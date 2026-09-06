@@ -6,7 +6,7 @@ import {
   ArrowUpRight, Cpu, Clock, XCircle, Clock3, Send, CheckCircle
 } from 'lucide-react';
 
-const API_BASE_URL = `http://${window.location.hostname}:3001`;
+const API_BASE_URL = window.location.port === '5173' ? `http://${window.location.hostname}:3001` : '';
 
 export default function App() {
   const [swarmActive, setSwarmActive] = useState(false);

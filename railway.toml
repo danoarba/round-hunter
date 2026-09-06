@@ -1,0 +1,7 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "npm install && cd server && npm install && pip install requests beautifulsoup4 python-dotenv ddgs premailer html2text"
+
+[deploy]
+startCommand = "cd server && node index.js"
+restartPolicyType = "ON_FAILURE"
