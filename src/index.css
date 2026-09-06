@@ -1,0 +1,92 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-50: #eef2ff;
+  --color-brand-500: #6366f1;
+  --color-brand-600: #4f46e5;
+  --color-brand-900: #312e81;
+  
+  --color-bg-base: #f8fafc; /* Light background */
+  --color-bg-panel: rgba(255, 255, 255, 0.7);
+  --color-border-glow: rgba(99, 102, 241, 0.2);
+  --color-border-subtle: rgba(0, 0, 0, 0.08);
+}
+
+@layer base {
+  body {
+    background-color: var(--color-bg-base);
+    color: #0f172a; /* Dark text for light mode */
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    background-image: 
+      radial-gradient(circle at 15% 50%, rgba(99, 102, 241, 0.05), transparent 30%),
+      radial-gradient(circle at 85% 30%, rgba(168, 85, 247, 0.05), transparent 30%);
+    background-attachment: fixed;
+  }
+}
+
+@layer utilities {
+  .glass-panel {
+    background: linear-gradient(145deg, rgba(255,255,255,0.9) 0%, rgba(248,250,252,0.95) 100%);
+    backdrop-filter: blur(24px);
+    border: 1px solid var(--color-border-subtle);
+    box-shadow: 0 10px 40px rgba(0,0,0,0.03), 0 1px 3px rgba(0,0,0,0.05);
+  }
+  
+  .glass-button {
+    background: linear-gradient(180deg, rgba(255,255,255,1) 0%, rgba(248,250,252,1) 100%);
+    border: 1px solid rgba(0,0,0,0.1);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  
+  .glass-button:hover {
+    background: linear-gradient(180deg, rgba(255,255,255,1) 0%, rgba(241,245,249,1) 100%);
+    border-color: rgba(99, 102, 241, 0.4);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.15);
+  }
+
+  .text-glow {
+    text-shadow: 0 0 15px rgba(99, 102, 241, 0.3);
+  }
+  
+  .animate-float {
+    animation: float 6s ease-in-out infinite;
+  }
+  
+  .animate-pulse-slow {
+    animation: pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  
+  .animate-scanline {
+    animation: scanline 8s linear infinite;
+  }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+@keyframes scanline {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(1000%); }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.05); 
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15); 
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.25); 
+}
