@@ -1,0 +1,18 @@
+[providers]
+node = true
+python = true
+
+[phases.setup]
+nixPkgs = ["...", "python311", "python311Packages.pip"]
+
+[phases.install]
+cmds = [
+  "npm install",
+  "npm run build",
+  "python3 -m venv /opt/venv",
+  "/opt/venv/bin/pip install requests beautifulsoup4 python-dotenv duckduckgo-search premailer html2text",
+  "cd server && npm install"
+]
+
+[start]
+cmd = "export PATH=\"/opt/venv/bin:$PATH\" && cd server && node index.js"
