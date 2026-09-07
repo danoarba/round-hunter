@@ -11,7 +11,8 @@ cmds = [
   "npm run build",
   "cd server && npm install",
   "python3 -m venv server/venv",
-  "server/venv/bin/pip install requests beautifulsoup4 python-dotenv duckduckgo-search premailer html2text"
+  "server/venv/bin/pip install --upgrade pip",
+  "server/venv/bin/pip install -r server/requirements.txt"
 ]
 
 [start]

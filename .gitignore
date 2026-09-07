@@ -28,6 +28,7 @@ dist-ssr
 server/.env
 *.pem
 *.rdp
+!.env.example
 
 # Database (server generates this fresh)
 server/clients.db

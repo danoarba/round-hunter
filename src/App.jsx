@@ -1,731 +1,1166 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { io } from 'socket.io-client';
-import { 
-  Bot, Terminal, Activity, Users, Mail, Settings, 
-  Search, Shield, Zap, Globe, Radar, Command,
-  ArrowUpRight, Cpu, Clock, XCircle, Clock3, Send, CheckCircle
+import {
+  Activity, Users, Mail, Settings, Search, Zap, Radar,
+  Clock, XCircle, Clock3, Send, LayoutDashboard,
+  Terminal, ChevronRight, Copy, ExternalLink,
+  Pause, Play, RefreshCw, Inbox, AlertTriangle,
+  Building2, MapPin, Phone, FileText, X, Check
 } from 'lucide-react';
 
 const API_BASE_URL = window.location.port === '5173' ? `http://${window.location.hostname}:3001` : '';
 
+/** Default hunt = Dental. Other industries are optional switches. */
+const INDUSTRIES = [
+  { id: 'dental', label: 'Dental Clinics', query: 'Dental Clinic', default: true },
+  { id: 'ortho', label: 'Orthodontists', query: 'Orthodontist' },
+  { id: 'derm', label: 'Dermatologists', query: 'Dermatologist' },
+  { id: 'medspa', label: 'Medical Spas', query: 'Medical Spa' },
+  { id: 'chiro', label: 'Chiropractors', query: 'Chiropractor' },
+  { id: 'restaurant', label: 'Restaurants', query: 'Restaurant' },
+  { id: 'cafe', label: 'Cafes', query: 'Cafe' },
+  { id: 'salon', label: 'Hair Salons', query: 'Hair Salon' },
+  { id: 'gym', label: 'Gyms & Fitness', query: 'Gym Fitness Center' },
+  { id: 'hotel', label: 'Hotels', query: 'Hotel' },
+  { id: 'law', label: 'Law Firms', query: 'Law Firm' },
+  { id: 'realestate', label: 'Real Estate Agencies', query: 'Real Estate Agency' },
+];
+
+const LOCATIONS = [
+  'New York, USA',
+  'Los Angeles, USA',
+  'Chicago, USA',
+  'Miami, USA',
+  'Austin, USA',
+  'Toronto, Canada',
+  'Vancouver, Canada',
+  'London, UK',
+  'Manchester, UK',
+  'Dubai, UAE',
+  'Sydney, Australia',
+  'Singapore',
+];
+
+const DEFAULT_INDUSTRY = INDUSTRIES.find(i => i.default) || INDUSTRIES[0];
+const DEFAULT_LOCATION = 'New York, USA';
+
+function buildTargetQuery(industryQuery, location) {
+  return `${industryQuery} in ${location}`;
+}
+
+function parseTargetQuery(q) {
+  const raw = (q || '').trim();
+  const match = raw.match(/^(.+?)\s+in\s+(.+)$/i);
+  if (!match) {
+    return { industryId: DEFAULT_INDUSTRY.id, location: DEFAULT_LOCATION, industryQuery: DEFAULT_INDUSTRY.query };
+  }
+  const industryQuery = match[1].trim();
+  const location = match[2].trim();
+  const found = INDUSTRIES.find(i => i.query.toLowerCase() === industryQuery.toLowerCase())
+    || INDUSTRIES.find(i => industryQuery.toLowerCase().includes(i.query.toLowerCase().split(' ')[0]));
+  return {
+    industryId: found?.id || DEFAULT_INDUSTRY.id,
+    industryQuery: found?.query || industryQuery,
+    location: LOCATIONS.includes(location) ? location : location,
+  };
+}
+
+const STATUS_FILTERS = [
+  'All', 'Awaiting Approval', 'Queued', 'Sending', 'Done',
+  'Email Opened', 'Hot Lead 🔥', 'No Email', 'No Website', 'Waiting', 'Ignored', 'Failed'
+];
+
+function parsePayload(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+function statusTone(status) {
+  const map = {
+    'Awaiting Approval': 'bg-teal-50 text-teal-800 border-teal-200',
+    Queued: 'bg-amber-50 text-amber-800 border-amber-200',
+    Sending: 'bg-sky-50 text-sky-800 border-sky-200',
+    Done: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+    'Email Opened': 'bg-cyan-50 text-cyan-800 border-cyan-200',
+    'Hot Lead 🔥': 'bg-rose-50 text-rose-800 border-rose-200',
+    'No Email': 'bg-orange-50 text-orange-800 border-orange-200',
+    'No Website': 'bg-stone-100 text-stone-600 border-stone-200',
+    Waiting: 'bg-yellow-50 text-yellow-800 border-yellow-200',
+    Ignored: 'bg-stone-100 text-stone-500 border-stone-200',
+    Failed: 'bg-red-50 text-red-700 border-red-200',
+  };
+  return map[status] || 'bg-stone-50 text-stone-700 border-stone-200';
+}
+
 export default function App() {
   const [swarmActive, setSwarmActive] = useState(false);
-  const [activeTab, setActiveTab] = useState('global');
+  const [activeTab, setActiveTab] = useState('overview');
   const [prospectFilter, setProspectFilter] = useState('All');
+  const [searchQuery, setSearchQuery] = useState('');
   const [time, setTime] = useState(new Date().toLocaleTimeString());
   const [logs, setLogs] = useState([]);
   const [prospects, setProspects] = useState([]);
-  const [selectedDraft, setSelectedDraft] = useState(null);
-  const [targetQuery, setTargetQuery] = useState('Dental Clinic in New York, USA');
+  const [selected, setSelected] = useState(null);
+  const [draftModal, setDraftModal] = useState(null);
+  const [draftEmail, setDraftEmail] = useState('');
+  const [draftSubject, setDraftSubject] = useState('');
+  const [targetQuery, setTargetQuery] = useState(buildTargetQuery(DEFAULT_INDUSTRY.query, DEFAULT_LOCATION));
+  const [industryId, setIndustryId] = useState(DEFAULT_INDUSTRY.id);
+  const [location, setLocation] = useState(DEFAULT_LOCATION);
   const [metrics, setMetrics] = useState({
-    activeAgents: 0,
-    leadsHunted: 0,
-    pitchesDelivered: 0,
-    conversionRate: 0.0
+    activeAgents: 0, leadsHunted: 0, pitchesDelivered: 0, conversionRate: 0.0
   });
-  
+  const [toast, setToast] = useState(null);
+  const [health, setHealth] = useState(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
   const socketRef = useRef(null);
   const logsEndRef = useRef(null);
 
+  const showToast = (message, tone = 'ok') => {
+    setToast({ message, tone });
+    setTimeout(() => setToast(null), 3200);
+  };
+
+  const loadProspects = () => {
+    fetch(`${API_BASE_URL}/api/prospects`)
+      .then(res => res.json())
+      .then(data => setProspects(Array.isArray(data) ? data : []))
+      .catch(() => setProspects([]));
+  };
+
   useEffect(() => {
-    // Time interval
     const timer = setInterval(() => setTime(new Date().toLocaleTimeString()), 1000);
-    
-    // Setup Socket connection to Backend
     socketRef.current = io(API_BASE_URL);
-    
+
     socketRef.current.on('statusUpdate', (data) => {
       setSwarmActive(data.swarmActive);
-      if (data.metrics) {
-        setMetrics(data.metrics);
-      }
+      if (data.metrics) setMetrics(data.metrics);
       if (data.currentTargetQuery) {
         setTargetQuery(data.currentTargetQuery);
+        const parsed = parseTargetQuery(data.currentTargetQuery);
+        setIndustryId(parsed.industryId);
+        setLocation(parsed.location);
       }
     });
-
-    socketRef.current.on('initialLogs', (history) => {
-      setLogs(history);
-    });
-
-    socketRef.current.on('log', (logEntry) => {
-      setLogs((prev) => [...prev, logEntry]);
-    });
-    
+    socketRef.current.on('initialLogs', (history) => setLogs(history || []));
+    socketRef.current.on('log', (logEntry) => setLogs((prev) => [...prev.slice(-199), logEntry]));
     socketRef.current.on('prospect_updated', (data) => {
       setProspects((prev) => {
         const exists = prev.find(p => p.id === data.id);
-        if (exists) {
-          return prev.map(p => p.id === data.id ? { ...p, ...data } : p);
-        } else {
-          return [data, ...prev];
-        }
+        if (exists) return prev.map(p => p.id === data.id ? { ...p, ...data } : p);
+        return [data, ...prev];
       });
+      if (selected?.id === data.id) setSelected((s) => s ? { ...s, ...data } : s);
     });
+
+    loadProspects();
+    fetch(`${API_BASE_URL}/api/health`).then(r => r.json()).then(setHealth).catch(() => {});
 
     return () => {
       clearInterval(timer);
-      if (socketRef.current) socketRef.current.disconnect();
+      socketRef.current?.disconnect();
     };
   }, []);
 
   useEffect(() => {
-    if (activeTab === 'prospects' || activeTab === 'campaigns') {
-      fetch(`${API_BASE_URL}/api/prospects`)
-        .then(res => res.json())
-        .then(data => {
-          if (Array.isArray(data)) {
-            setProspects(data);
-          } else {
-            setProspects([]);
-          }
-        })
-        .catch(err => {
-          console.error(err);
-          setProspects([]);
-        });
-    }
+    if (['prospects', 'campaigns', 'insights'].includes(activeTab)) loadProspects();
   }, [activeTab]);
 
-  const toggleSwarm = () => {
-    if (socketRef.current) {
-      socketRef.current.emit('toggleSwarm');
-    }
-  };
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [logs, activeTab]);
+
+  const toggleSwarm = () => socketRef.current?.emit('toggleSwarm');
 
   const handleQueryChange = (newQuery) => {
     setTargetQuery(newQuery);
-    if (socketRef.current) {
-      socketRef.current.emit('setTargetQuery', newQuery);
-    }
+    const parsed = parseTargetQuery(newQuery);
+    setIndustryId(parsed.industryId);
+    setLocation(parsed.location);
+    socketRef.current?.emit('setTargetQuery', newQuery);
   };
 
-  const updateStatus = async (id, status, prospect) => {
+  const applyHuntTarget = (nextIndustryId, nextLocation) => {
+    const industry = INDUSTRIES.find(i => i.id === nextIndustryId) || DEFAULT_INDUSTRY;
+    const loc = nextLocation || DEFAULT_LOCATION;
+    setIndustryId(industry.id);
+    setLocation(loc);
+    handleQueryChange(buildTargetQuery(industry.query, loc));
+    showToast(`Hunting switched → ${industry.label} in ${loc}`);
+  };
+
+  const updateStatus = async (id, status) => {
     try {
       await fetch(`${API_BASE_URL}/api/prospects/${id}/status`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status })
       });
-      // Optimistically update the UI
       setProspects(prev => prev.map(p => p.id === id ? { ...p, status } : p));
-      
-      // If status is "Queued", the backend loop will pick it up
-      if (status === 'Queued') {
-        alert(`Email added to Campaign Queue! It will be sent automatically.`);
-      }
-    } catch (error) {
-      console.error('Error updating status', error);
+      if (selected?.id === id) setSelected(s => ({ ...s, status }));
+      if (status === 'Queued') showToast('Queued — demo builds then email sends automatically');
+      else showToast(`Status → ${status}`);
+    } catch {
+      showToast('Status update failed', 'err');
     }
   };
 
   const resetDatabase = async () => {
-    if (window.confirm("Are you sure you want to clear the entire CRM database? This cannot be undone.")) {
-      try {
-        await fetch(`${API_BASE_URL}/api/prospects/reset`, { method: 'DELETE' });
-        setProspects([]);
-      } catch (error) {
-        console.error("Error resetting database:", error);
-      }
+    if (!window.confirm('Clear the entire CRM database? This cannot be undone.')) return;
+    try {
+      await fetch(`${API_BASE_URL}/api/prospects/reset`, { method: 'DELETE' });
+      setProspects([]);
+      setSelected(null);
+      showToast('Database cleared');
+    } catch {
+      showToast('Reset failed', 'err');
+    }
+  };
+
+  const openDraft = (prospect) => {
+    setDraftModal(prospect);
+    setDraftEmail(prospect.email?.includes('not_found') || prospect.email === 'No Email Found' ? '' : (prospect.email || ''));
+    setDraftSubject(prospect.subject || `quick question about ${prospect.name}`);
+  };
+
+  const approveDraft = async () => {
+    if (!draftModal) return;
+    if (!draftEmail || !draftEmail.includes('@')) {
+      showToast('Enter a valid email before queueing', 'err');
+      return;
+    }
+    await updateStatus(draftModal.id, 'Queued');
+    setDraftModal(null);
+  };
+
+  const filteredProspects = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return prospects.filter(p => {
+      if (!p) return false;
+      if (prospectFilter !== 'All' && p.status !== prospectFilter) return false;
+      if (!q) return true;
+      const hay = [p.name, p.email, p.location, p.niche, p.ceo_name, p.issue, p.status]
+        .filter(Boolean).join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+  }, [prospects, prospectFilter, searchQuery]);
+
+  const counts = useMemo(() => {
+    const c = { total: prospects.length, await: 0, queued: 0, done: 0, opened: 0, hot: 0, failed: 0, noEmail: 0 };
+    prospects.forEach(p => {
+      if (p.status === 'Awaiting Approval') c.await++;
+      else if (p.status === 'Queued' || p.status === 'Sending') c.queued++;
+      else if (p.status === 'Done') c.done++;
+      else if (p.status === 'Email Opened') c.opened++;
+      else if (p.status === 'Hot Lead 🔥') c.hot++;
+      else if (p.status === 'Failed') c.failed++;
+      else if (p.status === 'No Email') c.noEmail++;
+    });
+    return c;
+  }, [prospects]);
+
+  const nav = [
+    { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+    { id: 'prospects', label: 'Prospects', icon: Users, badge: counts.await || null },
+    { id: 'campaigns', label: 'Campaigns', icon: Mail, badge: counts.queued || null },
+    { id: 'live', label: 'Live Log', icon: Terminal },
+    { id: 'insights', label: 'Insights', icon: Activity },
+    { id: 'settings', label: 'Settings', icon: Settings },
+  ];
+
+  const copyText = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast('Copied');
+    } catch {
+      showToast('Copy failed', 'err');
     }
   };
 
   return (
-    <div className="flex h-screen bg-slate-50 text-slate-800 overflow-hidden font-sans selection:bg-indigo-500/20">
-      
-      {/* Sidebar Navigation */}
-      <aside className="w-[280px] border-r border-slate-200 bg-white/60 backdrop-blur-3xl flex flex-col relative z-20 shadow-xl">
-        <div className="h-20 flex items-center px-8 border-b border-slate-200 relative overflow-hidden">
-          {/* Logo Glow */}
-          <div className="absolute top-1/2 left-8 -translate-y-1/2 w-10 h-10 bg-indigo-500/20 blur-xl rounded-full"></div>
-          
-          <div className="flex items-center gap-3 relative z-10">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 p-[2px] shadow-[0_0_15px_rgba(99,102,241,0.3)]">
-              <div className="w-full h-full bg-white rounded-[10px] flex items-center justify-center backdrop-blur-md">
-                <Radar size={22} className="text-indigo-600 animate-spin-slow" style={{ animationDuration: '4s' }} />
-              </div>
-            </div>
-            <div>
-              <span className="block font-bold text-lg tracking-tight text-slate-900 leading-tight">Hermes OS</span>
-              <span className="block text-[11px] uppercase tracking-widest text-indigo-600 font-bold">Dial AI Core</span>
-            </div>
+    <div className="h-screen flex overflow-hidden text-[15px]">
+      {/* Sidebar */}
+      <aside className={`${sidebarOpen ? 'w-[240px]' : 'w-[72px]'} shrink-0 bg-[#141816] text-[#e8ebe7] flex flex-col transition-[width] duration-200`}>
+        <div className="h-16 px-4 flex items-center gap-3 border-b border-white/8">
+          <div className="w-9 h-9 rounded-lg bg-teal-700 flex items-center justify-center shrink-0">
+            <Radar size={18} className="text-teal-50" />
           </div>
+          {sidebarOpen && (
+            <div className="min-w-0">
+              <div className="font-semibold tracking-tight truncate">Hermes</div>
+              <div className="text-[11px] text-teal-300/80 tracking-wide">Dial AI Command</div>
+            </div>
+          )}
         </div>
 
-        <nav className="flex-1 py-8 px-4 space-y-2 overflow-y-auto">
-          <div className="px-4 text-xs font-bold text-slate-400 uppercase tracking-widest mb-4">Command Center</div>
-          <NavItem icon={<Globe size={18} />} label="Global Swarm" active={activeTab === 'global'} onClick={() => setActiveTab('global')} />
-          <NavItem icon={<Terminal size={18} />} label="Live Trajectories" badge="12" active={activeTab === 'trajectories'} onClick={() => setActiveTab('trajectories')} />
-          <NavItem icon={<Users size={18} />} label="Hunted Prospects" active={activeTab === 'prospects'} onClick={() => setActiveTab('prospects')} />
-          <NavItem icon={<Mail size={18} />} label="Active Campaigns" active={activeTab === 'campaigns'} onClick={() => setActiveTab('campaigns')} />
-          
-          <div className="px-4 text-xs font-bold text-slate-400 uppercase tracking-widest mt-8 mb-4">Intelligence</div>
-          <NavItem icon={<Activity size={18} />} label="Performance Analytics" active={activeTab === 'analytics'} onClick={() => setActiveTab('analytics')} />
-          <NavItem icon={<Shield size={18} />} label="Security & Guardrails" active={activeTab === 'security'} onClick={() => setActiveTab('security')} />
-          <NavItem icon={<Cpu size={18} />} label="Compute Allocation" active={activeTab === 'compute'} onClick={() => setActiveTab('compute')} />
+        <nav className="flex-1 py-4 px-2 space-y-0.5 overflow-y-auto">
+          {nav.map(item => {
+            const Icon = item.icon;
+            const active = activeTab === item.id;
+            return (
+              <button
+                key={item.id}
+                onClick={() => setActiveTab(item.id)}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors ${
+                  active ? 'bg-white/10 text-white' : 'text-white/55 hover:text-white hover:bg-white/5'
+                }`}
+                title={item.label}
+              >
+                <Icon size={18} className="shrink-0" />
+                {sidebarOpen && (
+                  <>
+                    <span className="flex-1 text-left text-sm font-medium">{item.label}</span>
+                    {item.badge ? (
+                      <span className="text-[11px] font-semibold bg-teal-700 text-white min-w-5 h-5 px-1.5 rounded-md flex items-center justify-center">
+                        {item.badge}
+                      </span>
+                    ) : null}
+                  </>
+                )}
+              </button>
+            );
+          })}
         </nav>
-        
-        <div className="p-6 border-t border-slate-200 bg-gradient-to-b from-transparent to-slate-100/50">
-          <button className="w-full glass-button flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-bold text-slate-700 group hover:text-indigo-600">
-            <Settings size={18} className="group-hover:rotate-90 transition-transform duration-500" />
-            System Preferences
+
+        <div className="p-3 border-t border-white/8 space-y-2">
+          <div className={`flex items-center gap-2 px-2 py-2 rounded-lg ${swarmActive ? 'bg-teal-900/40' : 'bg-white/5'}`}>
+            <span className={`w-2 h-2 rounded-sm ${swarmActive ? 'bg-teal-400' : 'bg-rose-400'}`} />
+            {sidebarOpen && (
+              <span className="text-xs text-white/70 font-medium">
+                {swarmActive ? 'Swarm live' : 'Swarm halted'}
+              </span>
+            )}
+          </div>
+          <button
+            onClick={() => setSidebarOpen(o => !o)}
+            className="w-full text-xs text-white/40 hover:text-white/70 py-1"
+          >
+            {sidebarOpen ? 'Collapse' : '›'}
           </button>
         </div>
       </aside>
 
-      {/* Main Workspace */}
-      <main className="flex-1 flex flex-col min-w-0 relative z-10 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-indigo-100/40 via-slate-50 to-slate-50">
-        
-        {/* Top Header */}
-        <header className="h-20 border-b border-slate-200 flex items-center justify-between px-8 bg-white/70 backdrop-blur-xl sticky top-0 z-30 shadow-sm">
-          <div className="flex items-center gap-4">
-            <h1 className="text-2xl font-bold text-slate-900 tracking-tight capitalize">
-              {activeTab.replace('-', ' ')} Overview
+      {/* Main */}
+      <div className="flex-1 flex flex-col min-w-0">
+        <header className="h-16 shrink-0 surface border-b flex items-center justify-between px-6 gap-4">
+          <div className="min-w-0">
+            <h1 className="text-lg font-semibold tracking-tight capitalize text-[var(--color-ink)]">
+              {activeTab === 'live' ? 'Live Log' : activeTab}
             </h1>
-            <div className="h-6 w-px bg-slate-300"></div>
-            <div className="flex items-center gap-2 text-sm font-mono text-slate-600 bg-slate-100 px-4 py-2 rounded-full border border-slate-200 shadow-inner">
-              <div className={`w-2.5 h-2.5 rounded-full ${swarmActive ? 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'bg-rose-500 shadow-[0_0_10px_rgba(244,63,94,0.5)]'}`}></div>
-              {swarmActive ? 'System Online' : 'System Halted'} • {time}
-            </div>
+            <p className="text-xs text-[var(--color-mute)] font-mono">{time}</p>
           </div>
-          
-          <div className="flex items-center gap-5">
-            <button className="w-11 h-11 rounded-full border border-slate-200 flex items-center justify-center text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-all bg-white shadow-sm">
-              <Command size={18} />
-            </button>
-            <div className="flex items-center gap-3 pl-5 border-l border-slate-200">
-              <div className="text-right hidden md:block">
-                <div className="text-sm font-bold text-slate-900">Admin Access</div>
-                <div className="text-xs text-slate-500 font-medium">Workspace Owner</div>
-              </div>
-              <div className="w-11 h-11 rounded-full bg-gradient-to-tr from-indigo-500 to-emerald-500 p-[2px] shadow-lg shadow-indigo-500/10">
-                <div className="w-full h-full bg-white rounded-full border-2 border-white overflow-hidden">
-                  <img src="https://api.dicebear.com/7.x/avataaars/svg?seed=Felix&backgroundColor=transparent" alt="User" className="w-full h-full object-cover opacity-90" />
-                </div>
-              </div>
+
+          <div className="flex items-center gap-3">
+            <div className="hidden md:flex items-center gap-2 surface-inset rounded-lg px-3 py-2 min-w-[280px]">
+              <Search size={14} className="text-[var(--color-mute)]" />
+              <input
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  if (activeTab !== 'prospects') setActiveTab('prospects');
+                }}
+                placeholder="Search prospects…"
+                className="bg-transparent outline-none text-sm w-full placeholder:text-[var(--color-mute)]"
+              />
             </div>
+            <button
+              onClick={toggleSwarm}
+              className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
+                swarmActive
+                  ? 'bg-rose-600 text-white hover:bg-rose-700'
+                  : 'bg-teal-700 text-white hover:bg-teal-800'
+              }`}
+            >
+              {swarmActive ? <Pause size={16} /> : <Play size={16} />}
+              {swarmActive ? 'Halt Swarm' : 'Start Swarm'}
+            </button>
           </div>
         </header>
 
-        {/* Dashboard Grid */}
-        <div className="flex-1 overflow-auto p-8 relative">
-          
-          <div className="max-w-[1600px] mx-auto space-y-8">
-            
-            {activeTab === 'global' ? (
-              <>
-                {/* Top Metrics Row */}
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                  <AdvancedMetric title="Active Agents" value={metrics.activeAgents.toString()} suffix="/ 50" trend={metrics.activeAgents > 0 ? "+4" : "0"} status={metrics.activeAgents > 0 ? "optimal" : "low"} icon={<Bot size={24}/>} />
-                  <AdvancedMetric title="Leads Hunted" value={metrics.leadsHunted.toLocaleString()} suffix="today" trend="+142" status="high" icon={<Search size={24}/>} />
-                  <AdvancedMetric title="Pitches Delivered" value={metrics.pitchesDelivered.toLocaleString()} trend="+86" status="optimal" icon={<Mail size={24}/>} />
-                  <AdvancedMetric title="Conversion Rate" value={metrics.conversionRate.toString()} suffix="%" trend="+1.2%" status="optimal" icon={<Zap size={24}/>} />
-                </div>
-
-                {/* Target Niche & Location Selector */}
-                <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  <div className="flex items-center gap-3 flex-1">
-                    <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold">
-                      <Search size={20} />
-                    </div>
-                    <div className="flex-1">
-                      <label className="text-xs font-bold uppercase tracking-wider text-slate-400 block mb-1">
-                        Active Target Niche & Location (Google Maps Search)
-                      </label>
-                      <input 
-                        type="text" 
-                        value={targetQuery}
-                        onChange={(e) => handleQueryChange(e.target.value)}
-                        placeholder="e.g. Dental Clinic in New York, USA"
-                        className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                      />
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-xs font-semibold text-slate-400">Presets:</span>
-                    {[
-                      'Dental Clinic in New York, USA',
-                      'Dermatologist in London, UK',
-                      'Medical Spa in Miami, USA',
-                      'Orthodontist in Toronto, Canada'
-                    ].map((preset) => (
-                      <button
-                        key={preset}
-                        onClick={() => handleQueryChange(preset)}
-                        className={`text-xs font-bold px-3 py-1.5 rounded-lg border transition-all ${
-                          targetQuery === preset 
-                            ? 'bg-indigo-600 text-white border-indigo-600' 
-                            : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
-                        }`}
-                      >
-                        {preset.split(' in ')[0]}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Main Visualizer and Terminal */}
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[600px]">
-                  
-                  {/* Agent Swarm Visualizer (Map/Grid) */}
-                  <div className="lg:col-span-1 glass-panel rounded-2xl flex flex-col overflow-hidden relative shadow-lg">
-                    <div className="p-6 border-b border-slate-100 flex justify-between items-center z-10 relative bg-white">
-                      <div>
-                        <h2 className="text-lg font-bold text-slate-900">Swarm Activity</h2>
-                        <p className="text-sm text-slate-500 mt-1">Live agent distribution</p>
-                      </div>
-                      <button onClick={toggleSwarm} className={`px-5 py-2.5 rounded-lg text-xs font-black uppercase tracking-wider transition-all border shadow-sm ${swarmActive ? 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100' : 'bg-emerald-50 text-emerald-600 border-emerald-200 hover:bg-emerald-100'}`}>
-                        {swarmActive ? 'Halt Swarm' : 'Deploy Swarm'}
-                      </button>
-                    </div>
-                    
-                    {/* Visualizer Grid */}
-                    <div className="flex-1 p-6 relative flex items-center justify-center bg-slate-50">
-                      <div className="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCI+CjxjaXJjbGUgY3g9IjEiIGN5PSIxIiByPSIxIiBmaWxsPSIjMDAwIiBmaWxsLW9wYWNpdHk9IjAuMDQiLz4KPC9zdmc+')] opacity-100"></div>
-                      
-                      <div className="relative w-full aspect-square max-w-[320px] border-2 border-slate-200 rounded-full flex items-center justify-center shadow-[inset_0_0_40px_rgba(0,0,0,0.02)]">
-                        <div className="absolute inset-0 rounded-full border-2 border-indigo-400/20 animate-ping" style={{ animationDuration: '3s' }}></div>
-                        <div className="w-3/4 h-3/4 rounded-full border-2 border-slate-200 flex items-center justify-center relative bg-white/50 backdrop-blur-sm">
-                          {/* Central Core */}
-                          <div className="w-20 h-20 rounded-full bg-indigo-50 border-2 border-indigo-200 flex items-center justify-center shadow-[0_0_30px_rgba(99,102,241,0.2)] z-20 backdrop-blur-md">
-                            <Cpu size={32} className="text-indigo-600" />
-                          </div>
-                          
-                          {/* Orbiting Agents */}
-                          {swarmActive && (
-                            <>
-                              <OrbitingAgent delay="0s" duration="8s" color="bg-emerald-500" />
-                              <OrbitingAgent delay="-2s" duration="12s" color="bg-blue-500" />
-                              <OrbitingAgent delay="-5s" duration="10s" color="bg-purple-500" />
-                              <OrbitingAgent delay="-8s" duration="15s" color="bg-amber-500" />
-                            </>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Hyper-Realistic Terminal (Even in Light mode, terminals often look best with a dark or slightly off-white theme. Let's make it an elegant slate terminal) */}
-                  <div className="lg:col-span-2 rounded-2xl flex flex-col overflow-hidden relative group shadow-xl border border-slate-800 bg-[#0f172a]">
-                    <div className="h-16 border-b border-white/10 bg-slate-900 flex items-center px-6 justify-between z-10 relative">
-                      <div className="flex items-center gap-4">
-                        <div className="flex gap-2.5">
-                          <div className="w-3.5 h-3.5 rounded-full bg-rose-500"></div>
-                          <div className="w-3.5 h-3.5 rounded-full bg-amber-400"></div>
-                          <div className="w-3.5 h-3.5 rounded-full bg-emerald-500"></div>
-                        </div>
-                        <div className="text-sm font-mono text-slate-300 flex items-center gap-2 font-bold">
-                          <Terminal size={16} className="text-indigo-400" /> root@hermes-swarm:~
-                        </div>
-                      </div>
-                      <div className="text-xs font-mono text-indigo-300 bg-indigo-500/20 px-3 py-1.5 rounded-md border border-indigo-400/30 font-bold">
-                        Auto-scroll: ON
-                      </div>
-                    </div>
-                    
-                    <div className="flex-1 p-6 font-mono text-[14px] overflow-y-auto relative">
-                      {/* Scanline effect */}
-                      <div className="absolute inset-0 h-full w-full pointer-events-none opacity-[0.1] bg-[linear-gradient(transparent_50%,rgba(0,0,0,1)_50%)] bg-[length:100%_4px] z-10"></div>
-                      
-                      <div className="space-y-1.5 relative z-20">
-                        {logs.length > 0 ? (
-                          <>
-                            {logs.map((log, index) => (
-                              <LogLine key={index} type={log.type} id={log.id} text={log.text} timestamp={log.timestamp} />
-                            ))}
-                            {swarmActive && (
-                              <div className="flex items-center gap-2 text-slate-400 animate-pulse mt-4 font-bold">
-                                <span className="text-emerald-400 text-lg">➜</span>
-                                <span className="typing-effect text-slate-300">Awaiting next signal</span>
-                                <span className="inline-block w-2.5 h-5 bg-slate-400"></span>
-                              </div>
-                            )}
-                            <div ref={logsEndRef} />
-                          </>
-                        ) : (
-                          <div className="flex flex-col items-center justify-center h-full text-slate-500 mt-24">
-                            <Terminal size={48} className="mb-6 opacity-40" />
-                            <p className="text-lg font-bold">Swarm operations halted.</p>
-                            <p className="text-sm mt-3 opacity-80">Click 'Deploy Swarm' to resume hunting.</p>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                </div>
-              </>
-            ) : activeTab === 'prospects' ? (
-              <div className="glass-panel rounded-2xl shadow-xl overflow-hidden flex flex-col h-[750px]">
-                <div className="p-6 border-b border-slate-200 bg-white flex flex-col z-10 gap-4">
-                  <div className="flex justify-between items-center">
-                    <div>
-                      <h2 className="text-xl font-bold text-slate-900">Hunted Prospects (CRM)</h2>
-                      <p className="text-sm text-slate-500 mt-1">Targeted leads automatically found by Scout Agent.</p>
-                    </div>
-                    <div className="flex gap-3">
-                      <button onClick={resetDatabase} className="px-4 py-2 bg-rose-50 border border-rose-200 text-rose-600 font-bold text-sm rounded-lg hover:bg-rose-100 shadow-sm flex items-center gap-2" title="Clear all prospects to start fresh">
-                        <XCircle size={16} /> Reset Database
-                      </button>
-                      <button className="px-4 py-2 bg-indigo-600 text-white font-bold text-sm rounded-lg hover:bg-indigo-500 shadow-sm shadow-indigo-500/30 flex items-center gap-2">
-                        <Mail size={16} /> Mass Pitch Selected
-                      </button>
-                    </div>
-                  </div>
-                  {/* Prospect Filters */}
-                  <div className="flex gap-2 border-b border-slate-100 pb-2">
-                    {['All', 'Awaiting Approval', 'Queued', 'No Email', 'No Website', 'Waiting', 'Ignored'].map(filter => (
-                      <button 
-                        key={filter}
-                        onClick={() => setProspectFilter(filter)}
-                        className={`px-4 py-1.5 rounded-full text-sm font-bold transition-all ${
-                          prospectFilter === filter 
-                            ? 'bg-indigo-50 text-indigo-700 border border-indigo-200' 
-                            : 'text-slate-500 hover:bg-slate-50 border border-transparent hover:border-slate-200'
-                        }`}
-                      >
-                        {filter}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                
-                <div className="flex-1 overflow-auto bg-slate-50">
-                  <table className="w-full text-left border-collapse">
-                    <thead className="bg-slate-100/80 sticky top-0 z-20 backdrop-blur-md">
-                      <tr>
-                        <th className="py-4 px-6 font-bold text-xs text-slate-500 uppercase tracking-widest border-b border-slate-200 w-12"><input type="checkbox" className="rounded border-slate-300" /></th>
-                        <th className="py-4 px-6 font-bold text-xs text-slate-500 uppercase tracking-widest border-b border-slate-200">Clinic Name</th>
-                        <th className="py-4 px-6 font-bold text-xs text-slate-500 uppercase tracking-widest border-b border-slate-200">Contact</th>
-                        <th className="py-4 px-6 font-bold text-xs text-slate-500 uppercase tracking-widest border-b border-slate-200">Date & Time</th>
-                        <th className="py-4 px-6 font-bold text-xs text-slate-500 uppercase tracking-widest border-b border-slate-200">Identified Pain Point</th>
-                        <th className="py-4 px-6 font-bold text-xs text-slate-500 uppercase tracking-widest border-b border-slate-200">Status</th>
-                        <th className="py-4 px-6 font-bold text-xs text-slate-500 uppercase tracking-widest border-b border-slate-200 text-right w-[250px]">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {(Array.isArray(prospects) ? prospects : []).filter(p => p && (prospectFilter === 'All' ? true : p?.status === prospectFilter)).length > 0 ? (Array.isArray(prospects) ? prospects : []).filter(p => p && (prospectFilter === 'All' ? true : p?.status === prospectFilter)).map((prospect) => {
-                        const locText = ((prospect.location || '') + ' ' + (prospect.niche || '')).toLowerCase();
-                        return (
-                        <tr key={prospect.id || prospect.name || Math.random()} className="hover:bg-white transition-colors group">
-                          <td className="py-4 px-6"><input type="checkbox" className="rounded border-slate-300" /></td>
-                          <td className="py-4 px-6">
-                            <div className="font-bold text-slate-900">{prospect.name}</div>
-                            {prospect.ceo_name && (
-                              <div className="text-xs font-bold text-indigo-600 mt-0.5">👤 {prospect.ceo_name}</div>
-                            )}
-                            <div className="text-xs text-slate-400 font-medium flex items-center gap-2 mt-1">
-                              <span className="text-sm">
-                                {locText.includes('uk') ? '🇬🇧' : 
-                                 locText.includes('canada') || locText.includes('toronto') ? '🇨🇦' : 
-                                 locText.includes('usa') || locText.includes('united states') ? '🇺🇸' : 
-                                 '🌍'}
-                              </span>
-                              <div className="flex flex-col">
-                                <span className="truncate max-w-[200px]" title={prospect.location}>
-                                  {prospect.location && prospect.location !== "Unknown Location" ? prospect.location : "Location not found"}
-                                </span>
-                                <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider">{prospect.niche}</span>
-                              </div>
-                            </div>
-                          </td>
-                          <td className="py-4 px-6 text-sm font-medium">
-                            {(!prospect.email || prospect.email.includes('not_found@example.com')) ? (
-                              <span className="text-xs text-rose-500 font-semibold bg-rose-50 border border-rose-100 px-2 py-0.5 rounded">No Email Found</span>
-                            ) : (
-                              <span className="text-slate-600">{prospect.email}</span>
-                            )}
-                          </td>
-                          <td className="py-4 px-6 text-sm text-slate-500">
-                            <div className="flex items-center gap-1.5 font-mono text-[11px]">
-                              <Clock size={12} className="text-slate-400" />
-                              {prospect.created_at ? new Date(prospect.created_at).toLocaleString() : 'Just now'}
-                            </div>
-                          </td>
-                          <td className="py-4 px-6 text-sm">
-                            <span className={`px-3 py-1 rounded-md text-xs font-bold border line-clamp-1 max-w-[200px] ${
-                              prospect.status === 'No Website' ? 'bg-slate-100 text-slate-500 border-slate-200' : 'bg-rose-50 text-rose-600 border-rose-100'
-                            }`} title={prospect.issue}>
-                              {prospect.issue}
-                            </span>
-                          </td>
-                          <td className="py-4 px-6">
-                            <span className={`px-3 py-1 rounded-full text-[11px] font-bold border flex w-max items-center gap-1.5 ${
-                              prospect.status === 'Identified' ? 'bg-indigo-50 text-indigo-600 border-indigo-200' :
-                              prospect.status === 'Ignored' ? 'bg-slate-100 text-slate-600 border-slate-200' :
-                              prospect.status === 'Waiting' ? 'bg-amber-50 text-amber-600 border-amber-200' :
-                              prospect.status === 'Queued' ? 'bg-purple-50 text-purple-600 border-purple-200 animate-pulse' :
-                              prospect.status === 'No Website' ? 'bg-slate-100 text-slate-500 border-slate-300' :
-                              prospect.status === 'No Email' ? 'bg-amber-50 text-amber-700 border-amber-200' :
-                              prospect.status === 'Done' ? 'bg-teal-50 text-teal-600 border-teal-200' :
-                              prospect.status === 'Email Opened' ? 'bg-blue-50 text-blue-600 border-blue-200 shadow-[0_0_10px_rgba(59,130,246,0.3)]' :
-                              prospect.status === 'Hot Lead 🔥' ? 'bg-rose-500 text-white border-rose-600 shadow-[0_0_15px_rgba(244,63,94,0.5)]' :
-                              prospect.status === 'Failed' ? 'bg-red-50 text-red-600 border-red-200' :
-                              'bg-emerald-50 text-emerald-600 border-emerald-200'
-                            }`}>
-                              <div className="w-1.5 h-1.5 rounded-full bg-current"></div>
-                              {prospect.status}
-                            </span>
-                          </td>
-                          <td className="py-4 px-6 text-right">
-                            <div className="flex items-center justify-end gap-2 transition-opacity">
-                              {prospect.linkedin_url && (
-                                <a 
-                                  href={prospect.linkedin_url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="w-8 h-8 flex items-center justify-center rounded-lg text-blue-600 bg-blue-50 hover:bg-blue-600 hover:text-white border border-blue-100 transition-all"
-                                  title="Open CEO LinkedIn"
-                                >
-                                  In
-                                </a>
-                              )}
-                              <button 
-                                onClick={() => updateStatus(prospect.id, 'Ignored', prospect)}
-                                className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 transition-all"
-                                title="Ignore"
-                              >
-                                <XCircle size={16} />
-                              </button>
-                              <button 
-                                onClick={() => updateStatus(prospect.id, 'Waiting', prospect)}
-                                className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-amber-600 hover:bg-amber-50 border border-transparent hover:border-amber-100 transition-all"
-                                title="Waiting"
-                              >
-                                <Clock3 size={16} />
-                              </button>
-                              {prospect.status !== 'No Website' && (
-                                <button 
-                                  onClick={() => setSelectedDraft(prospect)}
-                                  className="px-3 py-1.5 flex items-center gap-1.5 rounded-lg text-indigo-600 bg-indigo-50 font-bold text-xs border border-indigo-100 hover:bg-indigo-600 hover:text-white transition-all"
-                                  title="Review & Send"
-                                >
-                                  <Send size={14} /> Preview Email
-                                </button>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    }) : (
-                        <tr>
-                          <td colSpan="6" className="py-24 text-center">
-                            <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-400">
-                              <Search size={24} />
-                            </div>
-                            <h3 className="text-lg font-bold text-slate-700">No Prospects Found</h3>
-                            <p className="text-slate-500 mt-1 max-w-sm mx-auto">
-                              {prospectFilter === 'All' 
-                                ? "Deploy the swarm from the Global dashboard to instruct the Scout Agent to start hunting leads."
-                                : `No prospects match the filter "${prospectFilter}".`
-                              }
-                            </p>
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            ) : activeTab === 'campaigns' ? (
-              <div className="glass-panel rounded-2xl shadow-xl overflow-hidden flex flex-col h-[750px]">
-                <div className="p-6 border-b border-slate-200 bg-white z-10">
-                  <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
-                    <Mail size={24} className="text-indigo-600" /> Active Campaigns (Queue)
-                  </h2>
-                  <p className="text-sm text-slate-500 mt-1">Emails are sent automatically every 3-5 minutes to prevent spam filtering.</p>
-                </div>
-                <div className="p-8 flex-1 bg-slate-50 overflow-auto">
-                  <div className="max-w-3xl mx-auto space-y-4">
-                    {(Array.isArray(prospects) ? prospects : []).filter(p => p && p.status === 'Queued').length === 0 ? (
-                      <div className="text-center py-20">
-                        <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300 shadow-sm border border-slate-100">
-                          <CheckCircle size={32} />
-                        </div>
-                        <h3 className="text-lg font-bold text-slate-700">Queue is Empty</h3>
-                        <p className="text-slate-500 mt-1">All campaigns have been sent successfully. Go to Prospects to queue more.</p>
-                      </div>
-                    ) : (
-                      (Array.isArray(prospects) ? prospects : []).filter(p => p && p.status === 'Queued').map((prospect, idx) => (
-                        <div key={prospect.id} className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-center justify-between">
-                          <div className="flex items-center gap-4">
-                            <div className="w-10 h-10 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-sm">
-                              #{idx + 1}
-                            </div>
-                            <div>
-                              <h4 className="font-bold text-slate-900">{prospect.name}</h4>
-                              <p className="text-sm text-slate-500">{prospect.email} • {prospect.ceo_name ? `To: ${prospect.ceo_name}` : 'Generic Email'}</p>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-3">
-                            <span className="text-xs font-bold text-amber-600 bg-amber-50 px-3 py-1 rounded-full animate-pulse border border-amber-200">
-                              Waiting in Queue...
-                            </span>
-                            <button onClick={() => updateStatus(prospect.id, 'Awaiting Approval', prospect)} className="text-sm text-slate-400 hover:text-rose-600 font-bold underline">
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="flex flex-col items-center justify-center h-[600px] glass-panel rounded-2xl border-dashed border-2 border-indigo-200">
-                <div className="w-20 h-20 bg-indigo-50 rounded-full flex items-center justify-center mb-6 border border-indigo-100 shadow-[0_0_20px_rgba(99,102,241,0.1)]">
-                  <Bot size={40} className="text-indigo-500" />
-                </div>
-                <h2 className="text-2xl font-bold text-slate-800 mb-2">Module Loaded: {activeTab.replace('-', ' ').toUpperCase()}</h2>
-                <p className="text-slate-500 max-w-md text-center text-lg">
-                  Backend logic is currently disconnected. UI design phase is active. 
-                  Connect this module to Hermes Agent core to see live data.
-                </p>
-                <button onClick={() => setActiveTab('global')} className="mt-8 px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow-[0_8px_20px_rgba(99,102,241,0.3)] transition-all transform hover:-translate-y-1">
-                  Return to Dashboard
-                </button>
-              </div>
+        <main className="flex-1 overflow-auto p-6">
+          <div className="max-w-[1400px] mx-auto">
+            {activeTab === 'overview' && (
+              <Overview
+                metrics={metrics}
+                counts={counts}
+                targetQuery={targetQuery}
+                industryId={industryId}
+                location={location}
+                onApplyHunt={applyHuntTarget}
+                onQueryChange={handleQueryChange}
+                swarmActive={swarmActive}
+                logs={logs}
+                logsEndRef={logsEndRef}
+                onOpenProspects={() => setActiveTab('prospects')}
+                onOpenCampaigns={() => setActiveTab('campaigns')}
+              />
             )}
-            
-          </div>
-        </div>
 
-        {/* Draft View Modal */}
-        {selectedDraft && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm">
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden border border-slate-200">
-              <div className="px-6 py-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
-                <h3 className="font-bold text-slate-800 flex items-center gap-2">
-                  <Mail size={18} className="text-indigo-500" />
-                  Review Pitch: {selectedDraft.name}
-                </h3>
-                <button onClick={() => setSelectedDraft(null)} className="text-slate-400 hover:text-slate-600">
-                  &times;
-                </button>
+            {activeTab === 'prospects' && (
+              <ProspectsView
+                prospects={filteredProspects}
+                allCount={prospects.length}
+                filter={prospectFilter}
+                setFilter={setProspectFilter}
+                searchQuery={searchQuery}
+                setSearchQuery={setSearchQuery}
+                onSelect={setSelected}
+                selected={selected}
+                onDraft={openDraft}
+                onStatus={updateStatus}
+                onReset={resetDatabase}
+                onRefresh={loadProspects}
+                copyText={copyText}
+              />
+            )}
+
+            {activeTab === 'campaigns' && (
+              <CampaignsView
+                prospects={prospects}
+                onStatus={updateStatus}
+                onSelect={setSelected}
+                onDraft={openDraft}
+              />
+            )}
+
+            {activeTab === 'live' && (
+              <LiveLog logs={logs} swarmActive={swarmActive} logsEndRef={logsEndRef} />
+            )}
+
+            {activeTab === 'insights' && (
+              <InsightsView counts={counts} metrics={metrics} prospects={prospects} />
+            )}
+
+            {activeTab === 'settings' && (
+              <SettingsView
+                health={health}
+                targetQuery={targetQuery}
+                onRefreshHealth={() =>
+                  fetch(`${API_BASE_URL}/api/health`).then(r => r.json()).then(setHealth).catch(() => {})
+                }
+              />
+            )}
+          </div>
+        </main>
+      </div>
+
+      {/* Detail drawer */}
+      {selected && (
+        <DetailDrawer
+          prospect={selected}
+          onClose={() => setSelected(null)}
+          onDraft={openDraft}
+          onStatus={updateStatus}
+          copyText={copyText}
+        />
+      )}
+
+      {/* Draft modal */}
+      {draftModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#141816]/45 backdrop-blur-[2px]">
+          <div className="surface w-full max-w-2xl rounded-xl overflow-hidden shadow-2xl">
+            <div className="px-5 py-4 border-b border-[var(--color-line)] flex items-center justify-between">
+              <div>
+                <h3 className="font-semibold">Review & queue</h3>
+                <p className="text-xs text-[var(--color-mute)] mt-0.5">{draftModal.name}</p>
               </div>
-              <div className="p-6 space-y-4 text-sm text-slate-700">
-                <div className="flex gap-2 items-center">
-                  <span className="font-bold text-slate-900 w-16">To:</span> 
-                  <input 
-                    type="email"
-                    defaultValue={selectedDraft.email?.includes('not_found@example.com') ? '' : selectedDraft.email}
-                    placeholder="Enter target email (e.g. owner@clinic.com)"
-                    onChange={(e) => {
-                      selectedDraft.email = e.target.value;
-                    }}
-                    className="flex-1 px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-medium focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                  />
-                </div>
-                <div className="flex gap-2">
-                  <span className="font-bold text-slate-900 w-16">Subject:</span> 
-                  Quick fix for {selectedDraft.name}'s missed calls
-                </div>
-                <div className="h-px bg-slate-100 my-4"></div>
-                <div className="whitespace-pre-wrap font-medium">
-                  {selectedDraft.draft || "Draft content is being generated..."}
-                </div>
+              <button onClick={() => setDraftModal(null)} className="p-1.5 hover:bg-stone-100 rounded-md">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="p-5 space-y-4 max-h-[60vh] overflow-auto">
+              <label className="block">
+                <span className="text-xs font-semibold text-[var(--color-mute)] uppercase tracking-wide">To</span>
+                <input
+                  type="email"
+                  value={draftEmail}
+                  onChange={(e) => setDraftEmail(e.target.value)}
+                  className="mt-1.5 w-full surface-inset rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-700/30"
+                  placeholder="owner@clinic.com"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs font-semibold text-[var(--color-mute)] uppercase tracking-wide">Subject</span>
+                <input
+                  type="text"
+                  value={draftSubject}
+                  onChange={(e) => setDraftSubject(e.target.value)}
+                  className="mt-1.5 w-full surface-inset rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-teal-700/30"
+                />
+              </label>
+              <div>
+                <span className="text-xs font-semibold text-[var(--color-mute)] uppercase tracking-wide">Email body</span>
+                <pre className="mt-1.5 surface-inset rounded-lg p-4 text-sm whitespace-pre-wrap font-sans leading-relaxed text-[var(--color-ink-soft)]">
+                  {draftModal.draft || 'No draft yet'}
+                </pre>
               </div>
-              <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
-                <button onClick={() => setSelectedDraft(null)} className="px-5 py-2 rounded-lg font-bold text-slate-600 hover:bg-slate-200 transition-colors">
-                  Keep in Drafts
-                </button>
-                <button onClick={() => {
-                  updateStatus(selectedDraft.id, 'Queued', selectedDraft);
-                  setSelectedDraft(null);
-                }} className="px-5 py-2 rounded-lg font-bold text-white bg-indigo-600 hover:bg-indigo-500 transition-colors shadow-lg shadow-indigo-500/30 flex items-center gap-2">
-                  <Zap size={16} /> Approve & Queue Campaign
-                </button>
-              </div>
+              <p className="text-xs text-[var(--color-mute)] flex items-start gap-2">
+                <Zap size={14} className="mt-0.5 text-teal-700 shrink-0" />
+                On approve: dialaiagent.com builds the personalized demo (~10s), then Brevo sends this email.
+              </p>
+            </div>
+            <div className="px-5 py-4 border-t border-[var(--color-line)] flex justify-end gap-2 bg-[#f7f9f6]">
+              <button onClick={() => setDraftModal(null)} className="px-4 py-2 rounded-lg text-sm font-medium hover:bg-stone-200/60">
+                Keep draft
+              </button>
+              <button
+                onClick={approveDraft}
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-teal-700 text-white hover:bg-teal-800 inline-flex items-center gap-2"
+              >
+                <Send size={14} /> Approve & queue
+              </button>
             </div>
           </div>
-        )}
+        </div>
+      )}
 
-      </main>
+      {/* Toast */}
+      {toast && (
+        <div className={`fixed bottom-6 right-6 z-[60] px-4 py-3 rounded-lg text-sm font-medium shadow-lg border ${
+          toast.tone === 'err'
+            ? 'bg-red-50 text-red-800 border-red-200'
+            : 'bg-[#141816] text-white border-transparent'
+        }`}>
+          {toast.message}
+        </div>
+      )}
     </div>
   );
 }
 
-// Subcomponents
-function NavItem({ icon, label, badge, active = false, onClick }) {
+/* ---------- Views ---------- */
+
+function Overview({ metrics, counts, targetQuery, industryId, location, onApplyHunt, onQueryChange, swarmActive, logs, logsEndRef, onOpenProspects, onOpenCampaigns }) {
+  const activeIndustry = INDUSTRIES.find(i => i.id === industryId) || DEFAULT_INDUSTRY;
+
   return (
-    <button 
-      onClick={onClick}
-      className={`w-full flex items-center justify-between px-5 py-3.5 rounded-xl transition-all duration-300 group ${
-      active 
-        ? 'bg-indigo-50 text-indigo-700 border border-indigo-100 shadow-sm' 
-        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100 border border-transparent'
-    }`}>
-      <div className="flex items-center gap-3.5">
-        <div className={`${active ? 'text-indigo-600' : 'text-slate-400 group-hover:text-indigo-500'} transition-colors`}>
-          {icon}
-        </div>
-        <span className={`text-[15px] ${active ? 'font-bold' : 'font-medium'}`}>{label}</span>
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <Stat label="Active agents" value={metrics.activeAgents} hint={swarmActive ? 'Hunting' : 'Idle'} />
+        <Stat label="Leads hunted" value={metrics.leadsHunted} hint="Session" />
+        <Stat label="Awaiting you" value={counts.await} hint="Review drafts" action={onOpenProspects} />
+        <Stat label="In queue" value={counts.queued} hint="Sending soon" action={onOpenCampaigns} />
       </div>
-      {badge && (
-        <span className="text-[11px] font-bold bg-indigo-600 text-white px-2.5 py-0.5 rounded-full shadow-sm">
-          {badge}
-        </span>
+
+      <section className="surface rounded-xl p-5 space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="font-semibold">Hunt target</h2>
+            <p className="text-xs text-[var(--color-mute)] mt-0.5">
+              Default is <span className="font-semibold text-teal-800">Dental Clinics</span>. Switch industry or country anytime — swarm follows immediately.
+            </p>
+          </div>
+          <div className="text-xs font-mono surface-inset px-3 py-2 rounded-lg text-[var(--color-ink-soft)] max-w-full truncate">
+            {targetQuery}
+          </div>
+        </div>
+
+        <div className="grid md:grid-cols-2 gap-4">
+          <label className="block">
+            <span className="text-xs font-semibold uppercase tracking-wide text-[var(--color-mute)]">Industry</span>
+            <select
+              value={industryId}
+              onChange={(e) => onApplyHunt(e.target.value, location)}
+              className="mt-1.5 w-full surface-inset rounded-lg px-3 py-3 text-sm font-medium outline-none focus:ring-2 focus:ring-teal-700/25"
+            >
+              {INDUSTRIES.map(i => (
+                <option key={i.id} value={i.id}>
+                  {i.label}{i.default ? ' (default)' : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-xs font-semibold uppercase tracking-wide text-[var(--color-mute)]">Country / city</span>
+            <select
+              value={LOCATIONS.includes(location) ? location : '__custom'}
+              onChange={(e) => {
+                if (e.target.value === '__custom') return;
+                onApplyHunt(industryId, e.target.value);
+              }}
+              className="mt-1.5 w-full surface-inset rounded-lg px-3 py-3 text-sm font-medium outline-none focus:ring-2 focus:ring-teal-700/25"
+            >
+              {LOCATIONS.map(loc => (
+                <option key={loc} value={loc}>{loc}</option>
+              ))}
+              {!LOCATIONS.includes(location) && (
+                <option value="__custom">{location}</option>
+              )}
+            </select>
+          </label>
+        </div>
+
+        <div>
+          <span className="text-xs font-semibold uppercase tracking-wide text-[var(--color-mute)]">Quick locations for {activeIndustry.label}</span>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {LOCATIONS.slice(0, 8).map(loc => (
+              <button
+                key={loc}
+                onClick={() => onApplyHunt(industryId, loc)}
+                className={`text-xs font-medium px-3 py-2 rounded-lg border transition-colors ${
+                  location === loc
+                    ? 'bg-teal-700 text-white border-teal-700'
+                    : 'border-[var(--color-line)] hover:border-teal-700/40 text-[var(--color-ink-soft)]'
+                }`}
+              >
+                {loc}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <label className="block">
+          <span className="text-xs font-semibold uppercase tracking-wide text-[var(--color-mute)]">Custom search (optional)</span>
+          <input
+            value={targetQuery}
+            onChange={(e) => onQueryChange(e.target.value)}
+            className="mt-1.5 w-full surface-inset rounded-lg px-3 py-3 text-sm font-medium outline-none focus:ring-2 focus:ring-teal-700/25"
+            placeholder="e.g. Restaurant in Dubai, UAE"
+          />
+        </label>
+      </section>
+
+      <div className="grid lg:grid-cols-5 gap-4">
+        <section className="lg:col-span-2 surface rounded-xl p-5 flex flex-col">
+          <h2 className="font-semibold mb-1">Pipeline</h2>
+          <p className="text-xs text-[var(--color-mute)] mb-4">Where every lead sits right now</p>
+          <div className="space-y-2 flex-1">
+            {[
+              ['Awaiting Approval', counts.await],
+              ['Queued / Sending', counts.queued],
+              ['Done', counts.done],
+              ['Opened', counts.opened],
+              ['Hot leads', counts.hot],
+              ['No email', counts.noEmail],
+            ].map(([label, n]) => (
+              <div key={label} className="flex items-center gap-3">
+                <span className="text-sm text-[var(--color-ink-soft)] w-36 shrink-0">{label}</span>
+                <div className="flex-1 h-2 rounded bg-[#e8ece7] overflow-hidden">
+                  <div
+                    className="h-full bg-teal-700/80 rounded transition-all"
+                    style={{ width: `${Math.min(100, counts.total ? (n / counts.total) * 100 : 0)}%` }}
+                  />
+                </div>
+                <span className="font-mono text-sm font-semibold w-8 text-right">{n}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="lg:col-span-3 rounded-xl overflow-hidden border border-[#1f2924] bg-[#0f1412] flex flex-col min-h-[360px]">
+          <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm text-teal-200/90 font-mono">
+              <Terminal size={14} /> live swarm
+            </div>
+            <span className="text-[11px] text-white/40 font-mono">{logs.length} events</span>
+          </div>
+          <div className="flex-1 overflow-y-auto p-4 font-mono text-[12px] space-y-1">
+            {logs.length === 0 ? (
+              <p className="text-white/35 py-16 text-center text-sm font-sans">
+                Start the swarm to see scout / pitch activity here.
+              </p>
+            ) : (
+              logs.slice(-40).map((log, i) => (
+                <LogLine key={i} {...log} />
+              ))
+            )}
+            <div ref={logsEndRef} />
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function ProspectsView({
+  prospects, allCount, filter, setFilter, searchQuery, setSearchQuery,
+  onSelect, selected, onDraft, onStatus, onReset, onRefresh, copyText
+}) {
+  return (
+    <div className="flex gap-4 h-[calc(100vh-8.5rem)] min-h-[520px]">
+      <div className="flex-1 surface rounded-xl overflow-hidden flex flex-col min-w-0">
+        <div className="p-4 border-b border-[var(--color-line)] space-y-3">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <h2 className="font-semibold">Prospects</h2>
+              <p className="text-xs text-[var(--color-mute)]">
+                Showing {prospects.length} of {allCount}
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={onRefresh} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border border-[var(--color-line)] hover:bg-stone-50">
+                <RefreshCw size={14} /> Refresh
+              </button>
+              <button onClick={onReset} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-rose-700 border border-rose-200 hover:bg-rose-50">
+                <XCircle size={14} /> Reset DB
+              </button>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 md:hidden surface-inset rounded-lg px-3 py-2">
+            <Search size={14} className="text-[var(--color-mute)]" />
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search…"
+              className="bg-transparent outline-none text-sm w-full"
+            />
+          </div>
+          <div className="flex gap-1.5 overflow-x-auto pb-1">
+            {STATUS_FILTERS.map(f => (
+              <button
+                key={f}
+                onClick={() => setFilter(f)}
+                className={`shrink-0 px-2.5 py-1.5 rounded-md text-xs font-medium border ${
+                  filter === f
+                    ? 'bg-teal-700 text-white border-teal-700'
+                    : 'border-[var(--color-line)] text-[var(--color-ink-soft)] hover:bg-stone-50'
+                }`}
+              >
+                {f}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-auto">
+          {prospects.length === 0 ? (
+            <EmptyState
+              title="No prospects match"
+              body={filter === 'All' ? 'Start the swarm from Overview to hunt leads.' : `Nothing in “${filter}”.`}
+            />
+          ) : (
+            <table className="w-full text-left">
+              <thead className="sticky top-0 bg-[#f0f3ef] z-10">
+                <tr className="text-[11px] uppercase tracking-wider text-[var(--color-mute)]">
+                  <th className="py-3 px-4 font-semibold">Clinic</th>
+                  <th className="py-3 px-4 font-semibold hidden lg:table-cell">Contact</th>
+                  <th className="py-3 px-4 font-semibold">Status</th>
+                  <th className="py-3 px-4 font-semibold text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {prospects.map(p => (
+                  <tr
+                    key={p.id}
+                    onClick={() => onSelect(p)}
+                    className={`border-t border-[var(--color-line)] cursor-pointer transition-colors ${
+                      selected?.id === p.id ? 'bg-teal-50/60' : 'hover:bg-[#f7f9f6]'
+                    }`}
+                  >
+                    <td className="py-3.5 px-4">
+                      <div className="font-semibold text-[var(--color-ink)]">{p.name}</div>
+                      <div className="text-xs text-[var(--color-mute)] mt-0.5 flex items-center gap-1">
+                        <MapPin size={11} /> {p.location || '—'} · {p.niche || '—'}
+                      </div>
+                      {p.ceo_name && (
+                        <div className="text-xs text-teal-800 mt-0.5 font-medium">{p.ceo_name}</div>
+                      )}
+                    </td>
+                    <td className="py-3.5 px-4 hidden lg:table-cell text-sm text-[var(--color-ink-soft)]">
+                      {p.email && !String(p.email).includes('not_found') ? p.email : (
+                        <span className="text-orange-700 text-xs font-medium">No email</span>
+                      )}
+                    </td>
+                    <td className="py-3.5 px-4">
+                      <span className={`inline-flex text-[11px] font-semibold px-2 py-1 rounded-md border ${statusTone(p.status)}`}>
+                        {p.status}
+                      </span>
+                    </td>
+                    <td className="py-3.5 px-4" onClick={(e) => e.stopPropagation()}>
+                      <div className="flex justify-end gap-1">
+                        <IconBtn title="Ignore" onClick={() => onStatus(p.id, 'Ignored')}><XCircle size={15} /></IconBtn>
+                        <IconBtn title="Waiting" onClick={() => onStatus(p.id, 'Waiting')}><Clock3 size={15} /></IconBtn>
+                        {p.status !== 'No Website' && (
+                          <button
+                            onClick={() => onDraft(p)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-semibold bg-teal-700 text-white hover:bg-teal-800"
+                          >
+                            <Send size={12} /> Review
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DetailDrawer({ prospect, onClose, onDraft, onStatus, copyText }) {
+  const payload = parsePayload(prospect.api_payload);
+  const dyn = payload?.dynamic_fields || {};
+
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end">
+      <button className="absolute inset-0 bg-[#141816]/30" onClick={onClose} aria-label="Close" />
+      <aside className="relative w-full max-w-md h-full surface border-l shadow-2xl overflow-y-auto animate-[slideIn_.2s_ease]">
+        <div className="sticky top-0 bg-[var(--color-panel)] border-b border-[var(--color-line)] px-5 py-4 flex items-start justify-between gap-3 z-10">
+          <div className="min-w-0">
+            <h2 className="font-semibold text-lg leading-tight truncate">{prospect.name}</h2>
+            <span className={`inline-flex mt-2 text-[11px] font-semibold px-2 py-1 rounded-md border ${statusTone(prospect.status)}`}>
+              {prospect.status}
+            </span>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-md hover:bg-stone-100"><X size={18} /></button>
+        </div>
+
+        <div className="p-5 space-y-5">
+          <Section title="Contact">
+            <Row icon={Mail} label="Email" value={prospect.email} onCopy={() => copyText(prospect.email)} />
+            <Row icon={Users} label="Decision maker" value={prospect.ceo_name || '—'} />
+            <Row icon={MapPin} label="Location" value={prospect.location || '—'} />
+            <Row icon={Building2} label="Niche" value={prospect.niche || '—'} />
+            {prospect.linkedin_url && (
+              <a
+                href={prospect.linkedin_url}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-2 text-sm text-teal-800 font-medium hover:underline mt-2"
+              >
+                <ExternalLink size={14} /> Open LinkedIn profile
+              </a>
+            )}
+          </Section>
+
+          <Section title="Intelligence">
+            <Row icon={AlertTriangle} label="Pain / issue" value={prospect.issue || '—'} />
+            <Row icon={FileText} label="Services" value={dyn.services || '—'} />
+            <Row icon={Clock} label="Timings" value={dyn.clinic_timings || '—'} />
+            <Row icon={Users} label="Doctors" value={dyn.doctors || '—'} />
+            <Row icon={Phone} label="Phone (payload)" value={payload?.phone || '—'} />
+            <Row icon={ExternalLink} label="Website" value={payload?.website_url || '—'} onCopy={payload?.website_url ? () => copyText(payload.website_url) : undefined} />
+            {(dyn.consultation_fee || dyn.service_fees) && (
+              <>
+                <Row label="Consult fee" value={dyn.consultation_fee || '—'} />
+                <Row label="Service fees" value={dyn.service_fees || '—'} />
+              </>
+            )}
+          </Section>
+
+          <Section title="Email draft">
+            <p className="text-xs font-semibold text-[var(--color-mute)] mb-1">Subject</p>
+            <p className="text-sm mb-3">{prospect.subject || '—'}</p>
+            <pre className="surface-inset rounded-lg p-3 text-xs whitespace-pre-wrap leading-relaxed max-h-48 overflow-auto">
+              {prospect.draft || 'No draft'}
+            </pre>
+          </Section>
+
+          {payload && (
+            <Section title="Demo payload (sent on approve)">
+              <pre className="surface-inset rounded-lg p-3 text-[11px] font-mono overflow-auto max-h-40">
+                {JSON.stringify(payload, null, 2)}
+              </pre>
+            </Section>
+          )}
+
+          <Section title="Meta">
+            <Row label="ID" value={String(prospect.id)} />
+            <Row label="Created" value={prospect.created_at ? new Date(prospect.created_at).toLocaleString() : '—'} />
+          </Section>
+        </div>
+
+        <div className="sticky bottom-0 border-t border-[var(--color-line)] bg-[var(--color-panel)] p-4 flex flex-wrap gap-2">
+          {prospect.status !== 'No Website' && (
+            <button
+              onClick={() => onDraft(prospect)}
+              className="flex-1 inline-flex justify-center items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold bg-teal-700 text-white hover:bg-teal-800"
+            >
+              <Send size={14} /> Review & queue
+            </button>
+          )}
+          <button onClick={() => onStatus(prospect.id, 'Waiting')} className="px-3 py-2.5 rounded-lg text-sm font-medium border border-[var(--color-line)] hover:bg-stone-50">
+            Waiting
+          </button>
+          <button onClick={() => onStatus(prospect.id, 'Ignored')} className="px-3 py-2.5 rounded-lg text-sm font-medium text-rose-700 border border-rose-200 hover:bg-rose-50">
+            Ignore
+          </button>
+        </div>
+      </aside>
+      <style>{`@keyframes slideIn { from { transform: translateX(12px); opacity: 0; } to { transform: none; opacity: 1; } }`}</style>
+    </div>
+  );
+}
+
+function CampaignsView({ prospects, onStatus, onSelect, onDraft }) {
+  const groups = {
+    active: prospects.filter(p => ['Queued', 'Sending'].includes(p.status)),
+    sent: prospects.filter(p => ['Done', 'Email Opened', 'Hot Lead 🔥'].includes(p.status)),
+    failed: prospects.filter(p => p.status === 'Failed'),
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="grid sm:grid-cols-3 gap-3">
+        <Stat label="In queue" value={groups.active.length} hint="Auto-send ~30s" />
+        <Stat label="Sent / engaged" value={groups.sent.length} hint="Done + opens" />
+        <Stat label="Failed" value={groups.failed.length} hint="Retry from Prospects" />
+      </div>
+
+      <CampaignList
+        title="Sending queue"
+        empty="Queue empty — approve a draft from Prospects."
+        items={groups.active}
+        onStatus={onStatus}
+        onSelect={onSelect}
+        onDraft={onDraft}
+        cancelable
+      />
+      <CampaignList
+        title="Sent & engaged"
+        empty="No sends yet."
+        items={groups.sent}
+        onStatus={onStatus}
+        onSelect={onSelect}
+        onDraft={onDraft}
+      />
+      {groups.failed.length > 0 && (
+        <CampaignList
+          title="Failed"
+          empty=""
+          items={groups.failed}
+          onStatus={onStatus}
+          onSelect={onSelect}
+          onDraft={onDraft}
+        />
       )}
+    </div>
+  );
+}
+
+function CampaignList({ title, empty, items, onStatus, onSelect, onDraft, cancelable }) {
+  return (
+    <section className="surface rounded-xl overflow-hidden">
+      <div className="px-5 py-4 border-b border-[var(--color-line)]">
+        <h2 className="font-semibold">{title}</h2>
+      </div>
+      {items.length === 0 ? (
+        <p className="p-8 text-sm text-[var(--color-mute)] text-center">{empty}</p>
+      ) : (
+        <ul className="divide-y divide-[var(--color-line)]">
+          {items.map((p, idx) => (
+            <li key={p.id} className="px-5 py-4 flex items-center gap-4 hover:bg-[#f7f9f6]">
+              <div className="w-8 h-8 rounded-lg surface-inset flex items-center justify-center text-xs font-mono font-semibold text-[var(--color-mute)]">
+                {idx + 1}
+              </div>
+              <button onClick={() => onSelect(p)} className="flex-1 text-left min-w-0">
+                <div className="font-semibold truncate">{p.name}</div>
+                <div className="text-xs text-[var(--color-mute)] truncate">
+                  {p.email}{p.ceo_name ? ` · ${p.ceo_name}` : ''}
+                </div>
+              </button>
+              <span className={`text-[11px] font-semibold px-2 py-1 rounded-md border ${statusTone(p.status)}`}>
+                {p.status}
+              </span>
+              {cancelable && (
+                <button
+                  onClick={() => onStatus(p.id, 'Awaiting Approval')}
+                  className="text-xs font-semibold text-rose-700 hover:underline"
+                >
+                  Cancel
+                </button>
+              )}
+              {!cancelable && p.status === 'Failed' && (
+                <button onClick={() => onDraft(p)} className="text-xs font-semibold text-teal-800 hover:underline">
+                  Retry
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function LiveLog({ logs, swarmActive, logsEndRef }) {
+  return (
+    <section className="rounded-xl overflow-hidden border border-[#1f2924] bg-[#0f1412] h-[calc(100vh-8.5rem)] flex flex-col">
+      <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between">
+        <div className="flex items-center gap-2 text-sm text-teal-200 font-mono">
+          <Terminal size={14} /> root@hermes
+        </div>
+        <span className={`text-[11px] font-semibold px-2 py-1 rounded ${swarmActive ? 'bg-teal-900 text-teal-200' : 'bg-white/10 text-white/50'}`}>
+          {swarmActive ? 'RUNNING' : 'IDLE'}
+        </span>
+      </div>
+      <div className="flex-1 overflow-y-auto p-4 font-mono text-[12.5px] space-y-1">
+        {logs.length === 0 ? (
+          <EmptyState dark title="No log events" body="Deploy the swarm to stream agent output." />
+        ) : (
+          logs.map((log, i) => <LogLine key={i} {...log} />)
+        )}
+        <div ref={logsEndRef} />
+      </div>
+    </section>
+  );
+}
+
+function InsightsView({ counts, metrics, prospects }) {
+  const byNiche = useMemo(() => {
+    const m = {};
+    prospects.forEach(p => {
+      const k = p.niche || 'Unknown';
+      m[k] = (m[k] || 0) + 1;
+    });
+    return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  }, [prospects]);
+
+  return (
+    <div className="space-y-6">
+      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        <Stat label="Total CRM" value={counts.total} />
+        <Stat label="Pitches session" value={metrics.pitchesDelivered} />
+        <Stat label="Conversion %" value={metrics.conversionRate} />
+        <Stat label="Hot leads" value={counts.hot} />
+      </div>
+      <section className="surface rounded-xl p-5">
+        <h2 className="font-semibold mb-4">By niche</h2>
+        {byNiche.length === 0 ? (
+          <p className="text-sm text-[var(--color-mute)]">No data yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {byNiche.map(([niche, n]) => (
+              <div key={niche} className="flex items-center gap-3">
+                <span className="text-sm flex-1 truncate">{niche}</span>
+                <div className="w-40 h-2 rounded bg-[#e8ece7] overflow-hidden">
+                  <div className="h-full bg-teal-700/70" style={{ width: `${(n / counts.total) * 100}%` }} />
+                </div>
+                <span className="font-mono text-sm w-6 text-right">{n}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+      <section className="surface rounded-xl p-5">
+        <h2 className="font-semibold mb-2">How to use</h2>
+        <ol className="text-sm text-[var(--color-ink-soft)] space-y-2 list-decimal list-inside leading-relaxed">
+          <li>Set niche on Overview → Start Swarm</li>
+          <li>Open Prospects → click a row for full intel</li>
+          <li>Review draft → Approve & queue</li>
+          <li>Watch Campaigns for send status + opens</li>
+        </ol>
+      </section>
+    </div>
+  );
+}
+
+function SettingsView({ health, targetQuery, onRefreshHealth }) {
+  return (
+    <div className="max-w-xl space-y-4">
+      <section className="surface rounded-xl p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="font-semibold">System health</h2>
+          <button onClick={onRefreshHealth} className="text-xs font-semibold text-teal-800 inline-flex items-center gap-1">
+            <RefreshCw size={12} /> Refresh
+          </button>
+        </div>
+        {health ? (
+          <dl className="text-sm space-y-2">
+            <div className="flex justify-between gap-4"><dt className="text-[var(--color-mute)]">API</dt><dd className="font-medium flex items-center gap-1"><Check size={14} className="text-teal-700" /> OK</dd></div>
+            <div className="flex justify-between gap-4"><dt className="text-[var(--color-mute)]">Swarm</dt><dd className="font-medium">{health.swarmActive ? 'Active' : 'Halted'}</dd></div>
+            <div className="flex justify-between gap-4"><dt className="text-[var(--color-mute)]">Public URL</dt><dd className="font-mono text-xs break-all text-right">{health.publicUrl || '—'}</dd></div>
+          </dl>
+        ) : (
+          <p className="text-sm text-[var(--color-mute)]">Could not reach /api/health</p>
+        )}
+      </section>
+      <section className="surface rounded-xl p-5">
+        <h2 className="font-semibold mb-2">Active target</h2>
+        <p className="text-sm font-medium">{targetQuery}</p>
+        <p className="text-xs text-[var(--color-mute)] mt-3">
+          Email sending needs BREVO_SMTP_USER / BREVO_SMTP_PASS on the server. Inbox replies need IMAP_* vars.
+        </p>
+      </section>
+    </div>
+  );
+}
+
+/* ---------- Atoms ---------- */
+
+function Stat({ label, value, hint, action }) {
+  const Comp = action ? 'button' : 'div';
+  return (
+    <Comp
+      onClick={action}
+      className={`surface rounded-xl p-4 text-left ${action ? 'hover:border-teal-700/40 transition-colors cursor-pointer' : ''}`}
+    >
+      <div className="text-xs font-semibold uppercase tracking-wide text-[var(--color-mute)]">{label}</div>
+      <div className="mt-2 text-3xl font-semibold tracking-tight tabular-nums">{value}</div>
+      {hint && <div className="mt-1 text-xs text-[var(--color-mute)] flex items-center gap-1">{hint}{action && <ChevronRight size={12} />}</div>}
+    </Comp>
+  );
+}
+
+function Section({ title, children }) {
+  return (
+    <div>
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--color-mute)] mb-2">{title}</h3>
+      <div className="space-y-2">{children}</div>
+    </div>
+  );
+}
+
+function Row({ icon: Icon, label, value, onCopy }) {
+  return (
+    <div className="flex gap-2 items-start text-sm">
+      {Icon && <Icon size={14} className="mt-0.5 text-[var(--color-mute)] shrink-0" />}
+      <div className="min-w-0 flex-1">
+        <div className="text-[11px] text-[var(--color-mute)]">{label}</div>
+        <div className="font-medium break-words text-[var(--color-ink-soft)]">{value || '—'}</div>
+      </div>
+      {onCopy && value && value !== '—' && (
+        <button onClick={onCopy} className="p-1 rounded hover:bg-stone-100 text-[var(--color-mute)]" title="Copy">
+          <Copy size={13} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function IconBtn({ children, onClick, title }) {
+  return (
+    <button
+      title={title}
+      onClick={onClick}
+      className="w-8 h-8 inline-flex items-center justify-center rounded-md text-[var(--color-mute)] hover:bg-stone-100 hover:text-[var(--color-ink)]"
+    >
+      {children}
     </button>
   );
 }
 
-function AdvancedMetric({ title, value, suffix, trend, status, icon }) {
+function EmptyState({ title, body, dark }) {
   return (
-    <div className="glass-panel rounded-2xl p-7 relative overflow-hidden group">
-      {/* Hover Gradient Background */}
-      <div className="absolute -inset-px bg-gradient-to-br from-indigo-500/5 via-purple-500/0 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500 rounded-2xl pointer-events-none"></div>
-      
-      <div className="flex justify-between items-start relative z-10 mb-6">
-        <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-100 text-slate-500 group-hover:text-indigo-600 group-hover:border-indigo-200 group-hover:bg-indigo-50 transition-all duration-500 shadow-sm">
-          {icon}
-        </div>
-        <div className={`px-3 py-1.5 rounded-full text-[13px] font-bold flex items-center gap-1.5 border shadow-sm ${
-          status === 'optimal' ? 'bg-emerald-50 text-emerald-600 border-emerald-200' : 
-          'bg-indigo-50 text-indigo-600 border-indigo-200'
-        }`}>
-          <ArrowUpRight size={14} strokeWidth={3} />
-          {trend}
-        </div>
-      </div>
-      
-      <div className="relative z-10">
-        <h3 className="text-[15px] font-bold text-slate-500 mb-2">{title}</h3>
-        <div className="flex items-baseline gap-2">
-          <div className="text-[40px] leading-none font-black text-slate-900 tracking-tight">{value}</div>
-          {suffix && <div className="text-[15px] font-bold text-slate-400">{suffix}</div>}
-        </div>
-      </div>
+    <div className={`py-20 px-6 text-center ${dark ? 'text-white/40' : 'text-[var(--color-mute)]'}`}>
+      <Inbox size={28} className="mx-auto mb-3 opacity-50" />
+      <h3 className={`font-semibold ${dark ? 'text-white/70' : 'text-[var(--color-ink)]'}`}>{title}</h3>
+      <p className="text-sm mt-1 max-w-sm mx-auto">{body}</p>
     </div>
   );
 }
 
 function LogLine({ type, id, text, timestamp }) {
-  const styles = {
-    sys: { color: 'text-slate-400', prefix: '[SYSTEM]' },
-    worker: { color: 'text-indigo-300', prefix: `[${id}]` },
-    alert: { color: 'text-amber-400', prefix: '[ALERT] ' },
-    success: { color: 'text-emerald-400', prefix: '[SUCCESS]' },
-    action: { color: 'text-blue-400', prefix: '[ACTION]' }
+  const colors = {
+    sys: 'text-white/45',
+    worker: 'text-teal-300/90',
+    alert: 'text-amber-300',
+    success: 'text-emerald-300',
+    action: 'text-sky-300',
   };
-
-  const style = styles[type] || styles.sys;
-
   return (
-    <div className="flex items-start gap-3 py-1 group hover:bg-white/[0.05] -mx-3 px-3 rounded transition-colors">
-      <span className="text-slate-500 shrink-0 w-[70px] text-[13px] mt-0.5 font-bold">{timestamp}</span>
-      <span className={`${style.color} shrink-0 w-[85px] font-bold text-[13px] mt-0.5`}>{style.prefix}</span>
-      <span className="text-slate-200 leading-relaxed font-medium">{text}</span>
-    </div>
-  );
-}
-
-function OrbitingAgent({ delay, duration, color }) {
-  return (
-    <div className="absolute top-1/2 left-1/2 w-full h-full -mt-[50%] -ml-[50%] animate-spin-slow pointer-events-none" style={{ animationDuration: duration, animationDelay: delay }}>
-      <div className={`absolute top-0 left-1/2 -ml-2 w-4 h-4 rounded-full ${color} shadow-[0_0_15px_currentColor] border-2 border-white/50`}></div>
+    <div className="flex gap-3 leading-relaxed">
+      <span className="text-white/30 shrink-0 w-[62px]">{timestamp || '—'}</span>
+      <span className={`shrink-0 w-[72px] font-semibold ${colors[type] || colors.sys}`}>
+        {type === 'worker' ? id : (type || 'sys').toUpperCase()}
+      </span>
+      <span className="text-white/80 break-words">{text}</span>
     </div>
   );
 }

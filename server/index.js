@@ -2,16 +2,26 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-require('dotenv').config();
 const { spawn } = require('child_process');
-const db = require('./database');
 const path = require('path');
 const fs = require('fs');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
+const db = require('./database');
 
 // Use local venv python if it exists, else fall back to system python3
 const VENV_PYTHON = path.join(__dirname, 'venv', 'bin', 'python');
 const PYTHON = fs.existsSync(VENV_PYTHON) ? VENV_PYTHON : 'python3';
 console.log('Using Python:', PYTHON);
+
+// Public base URL for demos + email tracking (Railway-friendly)
+function getPublicUrl() {
+  if (process.env.PUBLIC_URL) return process.env.PUBLIC_URL.replace(/\/$/, '');
+  if (process.env.RAILWAY_PUBLIC_DOMAIN) {
+    return `https://${process.env.RAILWAY_PUBLIC_DOMAIN.replace(/\/$/, '')}`;
+  }
+  const port = process.env.PORT || 3001;
+  return `http://localhost:${port}`;
+}
 
 const app = express();
 app.use(cors());
@@ -30,6 +40,8 @@ const io = new Server(server, {
 let swarmActive = false;
 let swarmProcess = null;
 let swarmTimeout = null;
+let campaignBusy = false;
+let inboxBusy = false;
 
 // Simulated metrics and data
 let metrics = {
@@ -52,14 +64,21 @@ function emitLog(logData) {
 }
 
 
-let currentTargetQuery = "Dental Clinic in New York, USA";
+let currentTargetQuery = process.env.DEFAULT_TARGET_QUERY || "Dental Clinic in New York, USA";
 
 // Run a single iteration of the swarm
 const runSwarmIteration = () => {
   if (!swarmActive) return;
 
-  // Spawn Python Agent Orchestrator with targeted query
-  swarmProcess = spawn(PYTHON, ['agents.py', currentTargetQuery], { cwd: './server' });
+  // Spawn Python Agent Orchestrator (__dirname = server/, works on Railway + local)
+  swarmProcess = spawn(PYTHON, ['agents.py', currentTargetQuery], {
+    cwd: __dirname,
+    env: {
+      ...process.env,
+      PUBLIC_URL: getPublicUrl(),
+      PYTHONUNBUFFERED: '1'
+    }
+  });
   
   swarmProcess.stdout.on('data', (data) => {
     const output = data.toString().trim().split('\n');
@@ -219,8 +238,13 @@ app.post('/api/prospects/:id/status', (req, res) => {
       res.status(500).json({ error: err.message });
       return;
     }
+    io.emit('prospect_updated', { id: parseInt(id, 10), status });
     res.json({ success: true, changes });
   });
+});
+
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, publicUrl: getPublicUrl(), swarmActive });
 });
 
 app.get('/api/track/open/:id', (req, res) => {
@@ -251,12 +275,14 @@ app.get('/api/track/open/:id', (req, res) => {
 // ACTIVE CAMPAIGNS (QUEUE PROCESSOR)
 // ---------------------------------------------------------
 setInterval(() => {
-  // Find one lead in the queue
+  if (campaignBusy) return;
+
   db.getProspects((err, rows) => {
     if (err) return;
     const queuedLead = rows.find(r => r.status === 'Queued');
-    if (!queuedLead) return; // Queue empty
+    if (!queuedLead) return;
 
+    campaignBusy = true;
     console.log('Processing Campaign Queue for:', queuedLead.name);
     emitLog({
       type: 'action',
@@ -264,27 +290,32 @@ setInterval(() => {
       text: `Processing Queue: Sending email to ${queuedLead.ceo_name || 'Clinic Owner'} at ${queuedLead.name}...`,
       timestamp: new Date().toLocaleTimeString('en-US', { hour12: false })
     });
-    
-    // Update status to 'Sending' temporarily
+
     db.updateStatus(queuedLead.id, 'Sending', () => {
       io.emit('prospect_updated', { id: queuedLead.id, status: 'Sending' });
     });
 
-    const process = spawn(PYTHON, ['execute_lead.py', JSON.stringify(queuedLead)], {
-      cwd: __dirname
+    const child = spawn(PYTHON, ['execute_lead.py', JSON.stringify(queuedLead)], {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        PUBLIC_URL: getPublicUrl(),
+        PYTHONUNBUFFERED: '1'
+      }
     });
-    
-    process.stdout.on('data', (data) => {
+
+    child.stdout.on('data', (data) => {
       const text = data.toString().trim();
       if (text) emitLog({ type: 'sys', id: 'Execution-Bot', text: text, timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }) });
     });
-    
-    process.stderr.on('data', (data) => {
+
+    child.stderr.on('data', (data) => {
       const text = data.toString().trim();
       if (text) emitLog({ type: 'alert', id: 'Execution-Bot', text: text, timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }) });
     });
-    
-    process.on('close', (code) => {
+
+    child.on('close', (code) => {
+      campaignBusy = false;
       if (code === 0) {
         db.updateStatus(queuedLead.id, 'Done', (err) => {
           if (!err) {
@@ -303,36 +334,70 @@ setInterval(() => {
         });
       }
     });
+
+    child.on('error', (err) => {
+      campaignBusy = false;
+      console.error('Campaign spawn error:', err);
+      db.updateStatus(queuedLead.id, 'Failed', () => {
+        io.emit('prospect_updated', { id: queuedLead.id, status: 'Failed' });
+      });
+    });
   });
-}, 30 * 1000); // Check every 30 seconds for fast campaign processing
+}, 30 * 1000);
 
 // ---------------------------------------------------------
-// AI REPLY PARSER (INBOX MONITOR)
+// AI REPLY PARSER (INBOX MONITOR) — runs 24/7 when IMAP configured
 // ---------------------------------------------------------
 setInterval(() => {
-  if (!swarmActive) return; // Only run when swarm is active, or we could run it 24/7 anyway. Let's run it 24/7.
-  
-  const process = spawn(PYTHON, ['inbox_monitor.py'], {
-    cwd: __dirname
+  if (inboxBusy) return;
+  inboxBusy = true;
+
+  const child = spawn(PYTHON, ['inbox_monitor.py'], {
+    cwd: __dirname,
+    env: { ...process.env, PYTHONUNBUFFERED: '1' }
   });
-  
-  process.stdout.on('data', (data) => {
+
+  child.stdout.on('data', (data) => {
     const output = data.toString().trim().split('\n');
     output.forEach(line => {
       try {
         const logData = JSON.parse(line);
         emitLog({ type: logData.type, id: logData.id, text: logData.text, timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }) });
-        
+
         if (logData.text.includes('Hot Lead') || logData.text.includes('Ignored')) {
-          // Trigger a re-fetch of prospects in UI by emitting a generic update
           io.emit('statusUpdate', { swarmActive, metrics });
         }
       } catch (e) {}
     });
   });
-}, 5 * 60 * 1000); // Check inbox every 5 minutes
+
+  child.on('close', () => { inboxBusy = false; });
+  child.on('error', () => { inboxBusy = false; });
+}, 5 * 60 * 1000);
+
+// SPA fallback for non-API GET routes
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+  if (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) return next();
+  const indexPath = path.join(__dirname, '../dist/index.html');
+  if (!fs.existsSync(indexPath)) return res.status(500).send('Frontend build missing. Run npm run build.');
+  res.sendFile(indexPath);
+});
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
-  console.log(`Hermes Command Center running on port ${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Hermes Command Center running on 0.0.0.0:${PORT}`);
+  console.log(`Public URL: ${getPublicUrl()}`);
+  console.log(`Default hunt: ${currentTargetQuery}`);
+
+  // 24/7 hunting on Railway / production boots
+  const autoStart = String(process.env.AUTO_START_SWARM || 'true').toLowerCase() !== 'false';
+  if (autoStart) {
+    setTimeout(() => {
+      if (!swarmActive) {
+        emitLog({ type: 'sys', id: 'System', text: `Auto-starting 24/7 hunt for: ${currentTargetQuery}` });
+        startSwarm();
+      }
+    }, 4000);
+  }
 });

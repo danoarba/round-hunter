@@ -1,16 +1,27 @@
-# React + Vite
+# Round Hunter (Hermes) — Railway-ready lead hunter + cold email command center
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+## Local
 
-Currently, two official plugins are available:
+```bash
+npm install && npm run build
+cd server && npm install
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+cp ../.env.example .env   # fill Brevo (+ optional IMAP)
+node index.js
+```
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Dashboard: `http://localhost:3001`
 
-## React Compiler
+## Railway deploy
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+1. Push this repo to GitHub and create a Railway service from it.
+2. Builder: **Dockerfile** (configured in `.railway/railway.ts`) or Nixpacks (`nixpacks.toml`).
+3. Set Variables:
+   - `BREVO_SMTP_USER`
+   - `BREVO_SMTP_PASS`
+   - `PUBLIC_URL` = your Railway HTTPS URL (optional if `RAILWAY_PUBLIC_DOMAIN` is set)
+   - Optional: `IMAP_SERVER`, `IMAP_USER`, `IMAP_PASS`
+4. Deploy. Health check: `GET /api/health`
 
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+SQLite (`server/clients.db`) lives on the container filesystem — add a Railway Volume on `/app/server` if you need persistence across redeploys.

@@ -11,7 +11,8 @@ from email.utils import formatdate, make_msgid
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
+load_dotenv()  # also allow process env / Railway injected vars
 
 def main():
     if len(sys.argv) < 2:
@@ -72,17 +73,33 @@ def main():
     # STEP 3: Send spam-proof cold email via Brevo SMTP
     # -------------------------------------------------------
     print(f"Step 3: Sending cold email to {target_email}...")
+
+    if not target_email or "not_found" in target_email.lower() or "no email" in target_email.lower() or "@" not in target_email:
+        print(f"Error: invalid target email: {target_email}")
+        sys.exit(1)
     
     SENDER_EMAIL    = "danial@dialaiagent.info"
     SENDER_NAME     = "Danial"
     SENDER_DOMAIN   = "dialaiagent.info"
-    BREVO_SMTP_USER = os.getenv("BREVO_SMTP_USER", "b78ab6001@smtp-brevo.com")
+    BREVO_SMTP_USER = os.getenv("BREVO_SMTP_USER", "")
     BREVO_SMTP_PASS = os.getenv("BREVO_SMTP_PASS", "")
+
+    if not BREVO_SMTP_USER or not BREVO_SMTP_PASS:
+        print("Error: BREVO_SMTP_USER / BREVO_SMTP_PASS missing. Set them in Railway Variables.")
+        sys.exit(1)
+
+    public_base = (os.getenv("PUBLIC_URL") or "").rstrip("/")
+    if not public_base:
+        domain = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").rstrip("/")
+        if domain:
+            public_base = f"https://{domain}"
+    if not public_base:
+        public_base = "http://localhost:3001"
     
     try:
         prospect_id     = data.get("id", "0")
         tracking_pixel  = (
-            f'<img src="http://52.77.225.163:3001/api/track/open/{prospect_id}" '
+            f'<img src="{public_base}/api/track/open/{prospect_id}" '
             f'width="1" height="1" style="display:none;" alt="" />'
         )
         

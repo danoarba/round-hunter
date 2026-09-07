@@ -1,3 +1,3 @@
 # Render.com build and start configuration
-buildCommand: cd server && npm install && pip3 install requests beautifulsoup4 python-dotenv ddgs premailer html2text
+buildCommand: npm install && npm run build && cd server && npm install && pip3 install -r requirements.txt
 startCommand: node server/index.js

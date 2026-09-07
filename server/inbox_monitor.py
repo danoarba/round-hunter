@@ -8,6 +8,12 @@ import time
 import re
 import sys
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
+except ImportError:
+    pass
+
 # Connect to the SQLite database
 db_path = os.path.join(os.path.dirname(__file__), 'clients.db')
 

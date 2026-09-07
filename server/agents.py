@@ -5,10 +5,15 @@ import random
 try:
     from ddgs import DDGS
 except ImportError:
-    DDGS = None
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError:
+        DDGS = None
 import requests
 from bs4 import BeautifulSoup
 import re
+from urllib.parse import quote, urljoin
+import os
 
 def log_to_node(type_, id_, text):
     """Prints a JSON formatted string so Node.js can parse it and send to React via Socket.io"""
@@ -19,10 +24,6 @@ def log_to_node(type_, id_, text):
     }))
     sys.stdout.flush()
 
-import subprocess
-import csv
-import os
-import uuid
 
 class ScoutAgent:
     def __init__(self, target_niche):
@@ -51,13 +52,19 @@ class ScoutAgent:
                 if not name or name == "Unknown" or "yelp" in name.lower() or "zocdoc" in name.lower():
                     continue
                     
-                url = row.get("href", "")
+                url = row.get("href", "") or row.get("link", "")
                 if "yelp.com" in url or "zocdoc.com" in url or "healthgrades.com" in url or "yellowpages.com" in url:
                     continue
                     
                 email = "not_found@example.com"
                 phone = "Unknown"
-                address = "Unknown Location"
+                # Prefer niche location; enrich from search snippet when possible
+                niche_loc = self.target_niche.split(' in ')[-1].strip() if ' in ' in self.target_niche else "Unknown Location"
+                snippet = (row.get("body") or row.get("description") or "")
+                address = niche_loc
+                phone_match = re.search(r'(\+?\d[\d\-\.\s\(\)]{8,}\d)', snippet)
+                if phone_match:
+                    phone = phone_match.group(1).strip()
                 categories = self.target_niche.split(' in ')[0] if ' in ' in self.target_niche else "Business"
                 rating = "4.8"
                 
@@ -122,7 +129,6 @@ class ScoutAgent:
                                     if 'contact' in a['href'].lower() or 'about' in a['href'].lower():
                                         contact_url = a['href']
                                         if not contact_url.startswith('http'):
-                                            from urllib.parse import urljoin
                                             contact_url = urljoin(url, contact_url)
                                         try:
                                             c_res = requests.get(contact_url, headers=headers, timeout=4)
@@ -132,7 +138,7 @@ class ScoutAgent:
                                                 email = c_valid[0]
                                                 log_to_node('success', 'Scout-Alpha', f'Found email on contact page for {name}: {email}')
                                                 break
-                                        except:
+                                        except Exception:
                                             pass
                                             
                     except Exception as e:
@@ -201,33 +207,82 @@ class ScoutAgent:
         except Exception as e:
             log_to_node('alert', 'Scout-Alpha', f'Scraping failed: {str(e)}')
         
-        # Fallback if no leads found
         if not leads:
-            log_to_node('sys', 'Scout-Alpha', 'Falling back to safe local intelligence cache...')
-            time.sleep(2)
-            leads = [
-                {"name": "SmileBright Dental", "url": "https://www.smilebrightdental.com", "email": "dr.smith@smilebright.test", "issue": "No After-Hours Phone Answering", "niche": "Dental"}
-            ]
+            log_to_node('alert', 'Scout-Alpha', 'No leads found this iteration. Check DDGS availability / query niche.')
 
-        log_to_node('success', 'Scout-Alpha', f'Found {len(leads)} high-intent leads using Google Maps Scraper.')
+        log_to_node('success', 'Scout-Alpha', f'Found {len(leads)} high-intent leads via DuckDuckGo + website scrape.')
         return leads
+
+def infer_business_type(niche_or_query):
+    q = (niche_or_query or "").lower()
+    mapping = [
+        (("dental", "dentist", "orthodont"), "dental"),
+        (("dermatolog", "skin clinic"), "dermatology"),
+        (("medical spa", "med spa", "medspa"), "medspa"),
+        (("chiroprac"), "chiropractic"),
+        (("restaurant", "dining"), "restaurant"),
+        (("cafe", "coffee"), "cafe"),
+        (("salon", "barber"), "salon"),
+        (("gym", "fitness"), "fitness"),
+        (("hotel", "resort"), "hotel"),
+        (("law firm", "attorney", "lawyer"), "legal"),
+        (("real estate", "realtor"), "real_estate"),
+    ]
+    for keys, btype in mapping:
+        if any(k in q for k in keys):
+            return btype
+    return "dental"
+
+
+def industry_label(btype):
+    return {
+        "dental": "dental practices",
+        "dermatology": "dermatology clinics",
+        "medspa": "medical spas",
+        "chiropractic": "chiropractic clinics",
+        "restaurant": "restaurants",
+        "cafe": "cafes",
+        "salon": "salons",
+        "fitness": "gyms",
+        "hotel": "hotels",
+        "legal": "law firms",
+        "real_estate": "real estate agencies",
+    }.get(btype, "businesses")
+
+
+def booking_questions_for(btype):
+    if btype in ("restaurant", "cafe", "hotel"):
+        return "How many guests? What date and time works best? Any special requests?"
+    if btype in ("salon", "fitness"):
+        return "Are you a new or returning client? What service do you need? What time works best?"
+    if btype == "legal":
+        return "What type of legal matter is this? Have you worked with us before? Preferred callback time?"
+    if btype == "real_estate":
+        return "Are you buying, selling, or renting? Preferred neighborhood? Best time to talk?"
+    return "Are you a new or returning patient? Do you have insurance? What time works best, morning or afternoon?"
+
 
 class PitchAgent:
     def draft_email(self, lead, demo_link):
         log_to_node('worker', 'Pitch-Omega', f'Drafting hyper-personalized pitch for {lead["name"]}...')
         
-        # --- API HANDSHAKE (ZERO-FRICTION TOKEN INJECTION) ---
-        # We prep the payload but DO NOT SEND IT. It awaits manual approval in the dashboard.
+        target_email = lead["email"]
+        niche = lead.get("niche", "")
+        btype = infer_business_type(niche)
+        label = industry_label(btype)
+        is_health = btype in ("dental", "dermatology", "medspa", "chiropractic")
         
-        target_email = lead["email"] 
+        owner_name = lead.get("ceo_name") or lead.get("doctors") or ("Clinic Owner" if is_health else "Owner")
+        if owner_name == "Clinic Team":
+            owner_name = "Owner"
         
         payload = {
-            "full_name": lead.get("doctors", "Clinic Owner"),
+            "full_name": owner_name,
             "business_name": lead["name"],
             "email": target_email,
             "phone": lead.get("phone", "+1 000-000-0000"),
             "website_url": lead.get("url", "https://example.com"),
-            "business_type": "dental",
+            "business_type": btype,
             "dynamic_fields": {
                 "pain_point": lead.get("issue", "No critical issue detected"),
                 "services": lead.get("services", ""),
@@ -237,7 +292,7 @@ class PitchAgent:
                 "doctors": lead.get("doctors", ""),
                 "doctor_specialty": lead.get("specialty", ""),
                 "clinic_timings": lead.get("timings", ""),
-                "booking_questions": "Are you a new or returning patient? Do you have dental insurance? What time works best, morning or afternoon?"
+                "booking_questions": booking_questions_for(btype)
             }
         }
         
@@ -245,23 +300,16 @@ class PitchAgent:
         
         time.sleep(1)
         
-        # --- SPAM-SAFE EMAIL DRAFT ---
-        # Rules followed:
-        # 1. No spam trigger words (free, guaranteed, limited time, click here, etc)
-        # 2. Personal tone - sounds like a real human, not a bulk mailer
-        # 3. Short - under 150 words (long emails = spam signal)
-        # 4. Only ONE call to action
-        # 5. No ALL CAPS, no excessive exclamation marks
-        # 6. Mentions their specific business name, location, doctor name
-        # 7. Subject line is a question (higher open rate, not flagged as promo)
-        
         location = lead.get("location", "your area")
-        services = lead.get("services", "services")
         doctor = lead.get("doctors", "")
-        greeting = f"Hi {doctor.split(',')[0].strip()}" if doctor and doctor != "Clinic Team" else "Hi there"
+        if lead.get("ceo_name"):
+            greeting = f"Hi {lead['ceo_name'].split()[0]}"
+        elif doctor and doctor != "Clinic Team":
+            greeting = f"Hi {doctor.split(',')[0].strip()}"
+        else:
+            greeting = "Hi there"
         city = location.split(',')[0].strip() if location else "your area"
         
-        # Randomize subject (avoid identical emails triggering spam)
         import random
         subject_variations = [
             f"quick question about {lead['name']}",
@@ -270,18 +318,18 @@ class PitchAgent:
             f"something I noticed about {lead['name']}"
         ]
         
-        # Randomize opening line
         opener_variations = [
             f"I was checking out {lead['name']} in {city} and had a quick question.",
-            f"I came across {lead['name']} while researching dental practices in {city}.",
-            f"Noticed {lead['name']} on Google while looking at practices in {city}."
+            f"I came across {lead['name']} while researching {label} in {city}.",
+            f"Noticed {lead['name']} on Google while looking at {label} in {city}."
         ]
         
-        # Randomize middle paragraph
+        customer = "patients" if is_health else "customers"
+        desk = "front desk" if is_health else "team"
         body_variations = [
-            f"Do you ever get calls that go unanswered during busy hours or after hours? I ask because I built a small AI voice assistant trained specifically on your practice data - it can answer patient questions, collect their info, and book appointments automatically.",
-            f"I had a thought - practices in {city} often miss calls during peak hours. I put together a voice AI demo trained on {lead['name']}'s actual services and info, so patients get accurate answers even when the front desk is busy.",
-            f"One thing I notice with dental offices in {city} is missed calls after hours. I went ahead and built an AI receptionist using {lead['name']}'s info - it handles patient inquiries and can book appointments around the clock."
+            f"Do you ever get calls that go unanswered during busy hours or after hours? I ask because I built a small AI voice assistant trained specifically on your business data - it can answer {customer} questions, collect their info, and book appointments automatically.",
+            f"I had a thought - {label} in {city} often miss calls during peak hours. I put together a voice AI demo trained on {lead['name']}'s actual services and info, so {customer} get accurate answers even when the {desk} is busy.",
+            f"One thing I notice with {label} in {city} is missed calls after hours. I went ahead and built an AI receptionist using {lead['name']}'s info - it handles inquiries and can book around the clock."
         ]
         
         subject = random.choice(subject_variations)
@@ -312,10 +360,20 @@ class DeliveryAgent:
     def __init__(self):
         pass
 
+    def _public_base(self):
+        base = os.environ.get("PUBLIC_URL") or ""
+        if not base:
+            domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN") or ""
+            if domain:
+                base = f"https://{domain}"
+        if not base:
+            base = "http://localhost:3001"
+        return base.rstrip("/")
+
     def run(self, lead):
-        # Generates a demo link (we can keep this auto-generating so it's ready to view in the dashboard)
-        client_slug = lead["name"].lower().replace(" ", "-").replace("'", "")
-        demo_url = f"http://localhost:5173/client-demo.html?client={client_slug}&url={lead['url']}"
+        client_slug = re.sub(r'[^a-z0-9\-]+', '-', lead["name"].lower()).strip('-')
+        site = quote(lead.get("url") or "", safe="")
+        demo_url = f"{self._public_base()}/client-demo.html?client={client_slug}&url={site}"
         log_to_node('success', 'Delivery-X', f'Voice Demo generated: {demo_url}')
         return demo_url
 
@@ -325,15 +383,13 @@ if __name__ == "__main__":
     import random
     default_queries = [
         "Dental Clinic in New York, USA",
-        "Dermatologist in London, UK",
-        "Dental clinic in Vancouver, Canada",
-        "Orthodontist in Chicago, USA",
-        "Medical spa in Austin, USA",
-        "Cosmetic dentist in Los Angeles, USA",
-        "Chiropractor in Toronto, Canada"
+        "Dental Clinic in Los Angeles, USA",
+        "Dental Clinic in Chicago, USA",
+        "Dental Clinic in Toronto, Canada",
+        "Dental Clinic in London, UK",
     ]
     
-    target_query = sys.argv[1] if len(sys.argv) > 1 else random.choice(default_queries)
+    target_query = sys.argv[1] if len(sys.argv) > 1 else default_queries[0]
     scout = ScoutAgent(target_query)
     pitcher = PitchAgent()
     delivery = DeliveryAgent()

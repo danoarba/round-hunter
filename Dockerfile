@@ -1,30 +1,30 @@
 FROM ubuntu:24.04
 
-# Install python, pip, curl and nodejs 22
-RUN apt-get update && apt-get install -y curl python3 python3-pip python3-venv
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-RUN apt-get install -y nodejs
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PORT=3001
+ENV PYTHONUNBUFFERED=1
 
-# Create app directory
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates python3 python3-pip python3-venv \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Copy everything
-COPY . .
-
-# Install frontend and build
+COPY package.json package-lock.json ./
 RUN npm install
+
+COPY . .
 RUN npm run build
 
-# Install backend python dependencies
-RUN pip3 install --break-system-packages requests beautifulsoup4 python-dotenv duckduckgo-search premailer html2text
+RUN python3 -m venv /app/server/venv \
+    && /app/server/venv/bin/pip install --upgrade pip \
+    && /app/server/venv/bin/pip install -r /app/server/requirements.txt
 
-# Install backend node dependencies
 WORKDIR /app/server
 RUN npm install
 
-# Expose port 3001
 EXPOSE 3001
-ENV PORT=3001
 
-# Start server
 CMD ["node", "index.js"]
