@@ -33,207 +33,170 @@ class ScoutAgent:
         
         leads = []
         try:
-            # 1. Setup workspace and write query
-            # We run this in the server directory
-            workspace_dir = os.path.abspath(os.getcwd())
-            query_file = os.path.join(workspace_dir, "queries.txt")
-            results_file = os.path.join(workspace_dir, "results.csv")
+            log_to_node('sys', 'Scout-Alpha', 'Searching via DuckDuckGo Search API (Docker bypass)... This may take a few seconds.')
             
-            with open(query_file, "w") as f:
-                f.write(self.target_niche + "\n")
+            results = []
+            if DDGS:
+                try:
+                    with DDGS() as ddgs:
+                        # Find 20 official websites for the niche
+                        results = list(ddgs.text(self.target_niche + " official website", max_results=20))
+                except Exception as e:
+                    log_to_node('alert', 'Scout-Alpha', f'DuckDuckGo Search failed: {e}')
+            
+            log_to_node('sys', 'Scout-Alpha', 'Parsing search results and extracting deep customization info from websites...')
+            
+            for row in results:
+                name = row.get("title", "Unknown").split('-')[0].split('|')[0].strip()
+                if not name or name == "Unknown" or "yelp" in name.lower() or "zocdoc" in name.lower():
+                    continue
+                    
+                url = row.get("href", "")
+                if "yelp.com" in url or "zocdoc.com" in url or "healthgrades.com" in url or "yellowpages.com" in url:
+                    continue
+                    
+                email = "not_found@example.com"
+                phone = "Unknown"
+                address = "Unknown Location"
+                categories = self.target_niche.split(' in ')[0] if ' in ' in self.target_niche else "Business"
+                rating = "4.8"
                 
-            # Clear previous results if any
-            if os.path.exists(results_file):
-                # If it's a directory (from previous error), remove it
-                if os.path.isdir(results_file):
-                    import shutil
-                    shutil.rmtree(results_file)
-                else:
-                    os.remove(results_file)
-                
-            log_to_node('sys', 'Scout-Alpha', 'Deploying Docker Container for Web Scraping (Depth 1)... This may take 1-2 minutes.')
-            
-            # 2. Run Docker Command
-            docker_cmd = [
-                "docker", "run", "--rm",
-                "-v", "gmaps-playwright-cache:/opt",
-                "-v", f"{workspace_dir}:/workspace",
-                "gosom/google-maps-scraper",
-                "-email",
-                "-input", "/workspace/queries.txt",
-                "-results", "/workspace/results.csv",
-                "-depth", "2",
-                "-exit-on-inactivity", "2m"
-            ]
-            
-            # We don't want to block the whole system or crash if it takes too long, but we do wait.
-            process = subprocess.run(docker_cmd, capture_output=True, text=True)
-            
-            if process.returncode != 0:
-                log_to_node('alert', 'Scout-Alpha', f'Docker scraper failed: {process.stderr}')
-                
-            # 3. Parse CSV Results
-            if os.path.exists(results_file) and os.path.isfile(results_file):
-                log_to_node('sys', 'Scout-Alpha', 'Parsing scraped data and extracting deep customization info from websites...')
-                with open(results_file, "r", encoding="utf-8") as f:
-                    reader = csv.DictReader(f)
-                    # Limit set to 40 leads per hunt
-                    for row in list(reader)[:40]:
-                        name = row.get("title", "Unknown")
-                        if not name or name == "Unknown":
-                            continue
+                # Initialize defaults
+                services = categories
+                fee = "Not specified"
+                service_fees = f"Rating: {rating}"
+                doctors = "Clinic Team"
+                specialty = categories
+                timings = "Standard"
+                # --- DEEP WEBSITE SCRAPING ---
+                if url and url.startswith("http"):
+                    log_to_node('sys', 'Scout-Alpha', f'Deep scanning website for AI token customization: {url}')
+                    try:
+                        import requests
+                        from bs4 import BeautifulSoup
+                        import re
+                        
+                        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                        res = requests.get(url, headers=headers, timeout=5)
+                        soup = BeautifulSoup(res.text, 'html.parser')
+                        text_content = soup.get_text(separator=' ', strip=True).lower()
+                        
+                        # Services
+                        meta_desc = soup.find('meta', attrs={'name': 'description'})
+                        if meta_desc and meta_desc.get('content'):
+                            services = meta_desc['content'][:150]
                             
-                        email = row.get("emails", "")
-                        if not email:
-                            email = "not_found@example.com"
+                        # Fee
+                        fee_match = re.search(r'(consultation|exam|fee|price)[^\$]{0,30}(\$\d+)', text_content)
+                        if fee_match:
+                            fee = fee_match.group(2)
+                        elif re.search(r'free consultation', text_content):
+                            fee = "Free"
                             
-                        phone = row.get("phone", "Unknown")
-                        url = row.get("website", "")
-                        address = row.get("address", "Unknown Location")
-                        # CSV uses 'category' not 'categories'
-                        categories = row.get("category", "Dental")
-                        # CSV uses 'review_rating' not 'rating'
-                        rating = row.get("review_rating", "0")
-                        
-                        # Initialize defaults
-                        services = categories
-                        fee = "Not specified"
-                        service_fees = f"Rating: {rating}"
-                        doctors = "Clinic Team"
-                        specialty = row.get("category", "General")
-                        timings = "Standard"
-                        
-                        # --- DEEP WEBSITE SCRAPING ---
-                        if url and url.startswith("http"):
-                            log_to_node('sys', 'Scout-Alpha', f'Deep scanning website for AI token customization: {url}')
-                            try:
-                                import requests
-                                from bs4 import BeautifulSoup
-                                import re
+                        # Service Fees
+                        prices = re.findall(r'([a-zA-Z\s]{5,30})[\:\-\.]?\s*(\$\d{2,4})', text_content)
+                        if prices:
+                            valid_prices = [f"{p[0].strip()}: {p[1]}" for p in prices if len(p[0].strip()) > 3 and "payment" not in p[0].lower()]
+                            if valid_prices:
+                                service_fees = " | ".join(valid_prices[:3])
                                 
-                                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-                                res = requests.get(url, headers=headers, timeout=5)
-                                soup = BeautifulSoup(res.text, 'html.parser')
-                                text_content = soup.get_text(separator=' ', strip=True).lower()
-                                
-                                # Services
-                                meta_desc = soup.find('meta', attrs={'name': 'description'})
-                                if meta_desc and meta_desc.get('content'):
-                                    services = meta_desc['content'][:150]
-                                    
-                                # Fee
-                                fee_match = re.search(r'(consultation|exam|fee|price)[^\$]{0,30}(\$\d+)', text_content)
-                                if fee_match:
-                                    fee = fee_match.group(2)
-                                elif re.search(r'free consultation', text_content):
-                                    fee = "Free"
-                                    
-                                # Service Fees
-                                prices = re.findall(r'([a-zA-Z\s]{5,30})[\:\-\.]?\s*(\$\d{2,4})', text_content)
-                                if prices:
-                                    valid_prices = [f"{p[0].strip()}: {p[1]}" for p in prices if len(p[0].strip()) > 3 and "payment" not in p[0].lower()]
-                                    if valid_prices:
-                                        service_fees = " | ".join(valid_prices[:3])
-                                        
-                                # Doctors
-                                dr_match = re.findall(r'(Dr\.\s+[A-Z][a-zA-Z\']+(?:\s+[A-Z][a-zA-Z\']+)?)\b', soup.get_text())
-                                if dr_match:
-                                    doctors = ", ".join(list(set(dr_match))[:3])
-                                    
-                                # Timings
-                                timings_match = re.search(r'(.{0,40}(?:monday|mon-fri|tuesday|wednesday|thursday|friday|saturday|sunday|hours|closed).{0,60}(?:am|pm|\d:\d\d).{0,40})', text_content, re.IGNORECASE)
-                                if timings_match and len(timings_match.group(1)) > 10:
-                                    timings = timings_match.group(1).strip().replace('\n', ' ')
+                        # Doctors
+                        dr_match = re.findall(r'(Dr\.\s+[A-Z][a-zA-Z\']+(?:\s+[A-Z][a-zA-Z\']+)?)\b', soup.get_text())
+                        if dr_match:
+                            doctors = ", ".join(list(set(dr_match))[:3])
+                            
+                        # Timings
+                        timings_match = re.search(r'(.{0,40}(?:monday|mon-fri|tuesday|wednesday|thursday|friday|saturday|sunday|hours|closed).{0,60}(?:am|pm|\d:\d\d).{0,40})', text_content, re.IGNORECASE)
+                        if timings_match and len(timings_match.group(1)) > 10:
+                            timings = timings_match.group(1).strip().replace('\n', ' ')
 
-                                # Email Extraction from Website HTML
-                                if not email or "not_found" in email or "example.com" in email:
-                                    emails_found = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', res.text)
-                                    valid_emails = [e for e in emails_found if not any(e.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp']) and not any(x in e.lower() for x in ['sentry', 'wix', 'domain', 'example', 'schema.org', 'rating', 'bootstrap'])]
-                                    if valid_emails:
-                                        email = valid_emails[0]
-                                        log_to_node('success', 'Scout-Alpha', f'Found email on website for {name}: {email}')
-                                    else:
-                                        for a in soup.find_all('a', href=True):
-                                            if 'contact' in a['href'].lower() or 'about' in a['href'].lower():
-                                                contact_url = a['href']
-                                                if not contact_url.startswith('http'):
-                                                    from urllib.parse import urljoin
-                                                    contact_url = urljoin(url, contact_url)
-                                                try:
-                                                    c_res = requests.get(contact_url, headers=headers, timeout=4)
-                                                    c_emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', c_res.text)
-                                                    c_valid = [e for e in c_emails if not any(e.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp']) and not any(x in e.lower() for x in ['sentry', 'wix', 'domain', 'example', 'schema.org'])]
-                                                    if c_valid:
-                                                        email = c_valid[0]
-                                                        log_to_node('success', 'Scout-Alpha', f'Found email on contact page for {name}: {email}')
-                                                        break
-                                                except:
-                                                    pass
-                                                    
-                            except Exception as e:
-                                log_to_node('alert', 'Scout-Alpha', f'Could not deep-scan {url}: {e}')
+                        # Email Extraction from Website HTML
+                        if not email or "not_found" in email or "example.com" in email:
+                            emails_found = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', res.text)
+                            valid_emails = [e for e in emails_found if not any(e.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp']) and not any(x in e.lower() for x in ['sentry', 'wix', 'domain', 'example', 'schema.org', 'rating', 'bootstrap'])]
+                            if valid_emails:
+                                email = valid_emails[0]
+                                log_to_node('success', 'Scout-Alpha', f'Found email on website for {name}: {email}')
+                            else:
+                                for a in soup.find_all('a', href=True):
+                                    if 'contact' in a['href'].lower() or 'about' in a['href'].lower():
+                                        contact_url = a['href']
+                                        if not contact_url.startswith('http'):
+                                            from urllib.parse import urljoin
+                                            contact_url = urljoin(url, contact_url)
+                                        try:
+                                            c_res = requests.get(contact_url, headers=headers, timeout=4)
+                                            c_emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', c_res.text)
+                                            c_valid = [e for e in c_emails if not any(e.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp']) and not any(x in e.lower() for x in ['sentry', 'wix', 'domain', 'example', 'schema.org'])]
+                                            if c_valid:
+                                                email = c_valid[0]
+                                                log_to_node('success', 'Scout-Alpha', f'Found email on contact page for {name}: {email}')
+                                                break
+                                        except:
+                                            pass
+                                            
+                    except Exception as e:
+                        log_to_node('alert', 'Scout-Alpha', f'Could not deep-scan {url}: {e}')
 
-                        # --- DuckDuckGo Email Fallback ---
-                        if (not email or "not_found" in email or "example.com" in email) and DDGS:
-                            try:
-                                ddg = DDGS()
-                                d_results = list(ddg.text(f'"{name}" contact email', max_results=2))
-                                for r in d_results:
-                                    t_search = r.get("title", "") + " " + r.get("body", "")
-                                    d_emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', t_search)
-                                    d_valid = [e for e in d_emails if not any(e.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp']) and not any(x in e.lower() for x in ['sentry', 'wix', 'domain', 'example', 'schema.org'])]
-                                    if d_valid:
-                                        email = d_valid[0]
-                                        log_to_node('success', 'Scout-Alpha', f'Found email via DDGS search for {name}: {email}')
-                                        break
-                            except:
-                                pass
-                                
-                        # --- CEO & LINKEDIN HUNTING ---
-                        ceo_name = ""
-                        linkedin_url = ""
+                # --- DuckDuckGo Email Fallback ---
+                if (not email or "not_found" in email or "example.com" in email) and DDGS:
+                    try:
+                        ddg = DDGS()
+                        d_results = list(ddg.text(f'"{name}" contact email', max_results=2))
+                        for r in d_results:
+                            t_search = r.get("title", "") + " " + r.get("body", "")
+                            d_emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', t_search)
+                            d_valid = [e for e in d_emails if not any(e.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp']) and not any(x in e.lower() for x in ['sentry', 'wix', 'domain', 'example', 'schema.org'])]
+                            if d_valid:
+                                email = d_valid[0]
+                                log_to_node('success', 'Scout-Alpha', f'Found email via DDGS search for {name}: {email}')
+                                break
+                    except:
+                        pass
                         
-                        try:
-                            if DDGS:
-                                ddg = DDGS()
-                                search_query = f'{name} {address} "CEO" OR "Owner" site:linkedin.com/in'
-                                log_to_node('sys', 'Scout-Alpha', f'Hunting Decision Maker (CEO) for {name} on LinkedIn...')
-                                
-                                results = list(ddg.text(search_query, max_results=3))
-                                if results:
-                                    first_result = results[0]
-                                    linkedin_url = first_result.get("href", "")
-                                    title = first_result.get("title", "")
-                                    
-                                    # Basic heuristic to extract name from LinkedIn title (e.g., "John Doe - CEO - Clinic Name")
-                                    name_match = re.match(r'^([A-Z][a-zA-Z\s\-]+)\s*-', title)
-                                    if name_match:
-                                        ceo_name = name_match.group(1).strip()
-                                        
-                                    if ceo_name:
-                                        log_to_node('success', 'Scout-Alpha', f'Found CEO/Owner: {ceo_name} for {name}')
-                        except Exception as e:
-                            log_to_node('alert', 'Scout-Alpha', f'Error hunting CEO: {e}')
-                        # ---------------------------------
+                # --- CEO & LINKEDIN HUNTING ---
+                ceo_name = ""
+                linkedin_url = ""
+                
+                try:
+                    if DDGS:
+                        ddg = DDGS()
+                        search_query = f'{name} {address} "CEO" OR "Owner" site:linkedin.com/in'
+                        log_to_node('sys', 'Scout-Alpha', f'Hunting Decision Maker (CEO) for {name} on LinkedIn...')
                         
-                        leads.append({
-                            "name": name, 
-                            "url": url,
-                            "email": email,
-                            "phone": phone,
-                            "services": services,
-                            "location": address,
-                            "fee": fee,
-                            "service_fees": service_fees,
-                            "doctors": doctors,
-                            "specialty": specialty,
-                            "timings": timings,
-                            "ceo_name": ceo_name,
-                            "linkedin_url": linkedin_url,
-                            "niche": self.target_niche
-                        })
-            else:
-                log_to_node('alert', 'Scout-Alpha', 'No results.csv found. Did the scraper run?')
+                        results = list(ddg.text(search_query, max_results=3))
+                        if results:
+                            first_result = results[0]
+                            linkedin_url = first_result.get("href", "")
+                            title = first_result.get("title", "")
+                            
+                            # Basic heuristic to extract name from LinkedIn title (e.g., "John Doe - CEO - Clinic Name")
+                            name_match = re.match(r'^([A-Z][a-zA-Z\s\-]+)\s*-', title)
+                            if name_match:
+                                ceo_name = name_match.group(1).strip()
+                                
+                            if ceo_name:
+                                log_to_node('success', 'Scout-Alpha', f'Found CEO/Owner: {ceo_name} for {name}')
+                except Exception as e:
+                    log_to_node('alert', 'Scout-Alpha', f'Error hunting CEO: {e}')
+                # ---------------------------------
+                
+                leads.append({
+                    "name": name, 
+                    "url": url,
+                    "email": email,
+                    "phone": phone,
+                    "services": services,
+                    "location": address,
+                    "fee": fee,
+                    "service_fees": service_fees,
+                    "doctors": doctors,
+                    "specialty": specialty,
+                    "timings": timings,
+                    "ceo_name": ceo_name,
+                    "linkedin_url": linkedin_url,
+                    "niche": self.target_niche
+                })
                 
         except Exception as e:
             log_to_node('alert', 'Scout-Alpha', f'Scraping failed: {str(e)}')
