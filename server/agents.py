@@ -326,6 +326,57 @@ def is_non_commercial_lead(name="", url="", email="", snippet=""):
     return False
 
 
+
+# ---------------------------------------------------------------------------
+# Industry-category mismatch filter
+# Ensures only leads matching the HUNTED industry pass through.
+# Keys match infer_business_type() return values.
+# ---------------------------------------------------------------------------
+_INDUSTRY_MUST_HAVE = {
+    "dental":       ("dental", "dentist", "orthodont", "endodont", "periodont", "implant", "oral", "teeth", "tooth"),
+    "dermatology":  ("dermatol", "skin clinic", "skin care", "aesthetic clinic"),
+    "medspa":       ("med spa", "medspa", "medical spa", "aesthetic", "botox", "laser"),
+    "chiropractic": ("chiroprac", "spine", "spinal", "back pain clinic"),
+    "restaurant":   ("restaurant", "dining", "bistro", "eatery", "grill", "brasserie"),
+    "cafe":         ("cafe", "coffee", "bakery", "tea house", "patisserie"),
+    "salon":        ("salon", "barber", "hair", "beauty parlour", "nail"),
+    "fitness":      ("gym", "fitness", "crossfit", "yoga", "pilates", "health club"),
+    "hotel":        ("hotel", "resort", "inn", "bed and breakfast", "b&b", "lodge"),
+    "legal":        ("law firm", "attorney", "lawyer", "solicitor", "barrister", "legal"),
+    "real_estate":  ("real estate", "realtor", "estate agent", "property"),
+}
+
+# Hard-reject keywords - skip lead regardless of target industry
+_INDUSTRY_HARD_REJECT = (
+    "pharmacy", "pharmacist", "drug store", "chemist",
+    "college", "university", "school", "academy", "institute of technology",
+    "hospital", "nhs trust",
+    "supermarket", "grocery", "retail store",
+    "insurance", "bank", "financial services",
+    "charity", "non-profit", "nonprofit",
+    "government", "council", "municipality",
+    "funeral", "mortuary",
+)
+
+
+def is_industry_mismatch(name="", snippet="", target_btype="dental"):
+    """
+    Returns True (skip lead) when:
+    1. The name/snippet contains a hard-reject keyword (completely wrong category), OR
+    2. The target industry has a must-have keyword list and NONE match the name/snippet.
+    """
+    blob = f"{name} {snippet}".lower()
+
+    if any(k in blob for k in _INDUSTRY_HARD_REJECT):
+        return True
+
+    must_have = _INDUSTRY_MUST_HAVE.get(target_btype)
+    if must_have and not any(k in blob for k in must_have):
+        return True
+
+    return False
+
+
 class ScoutAgent:
     def __init__(self, target_niche, hunt_mode='rotating'):
         self.target_niche = target_niche
@@ -529,6 +580,10 @@ class ScoutAgent:
                 if is_non_commercial_lead(name=name, url=url, snippet=snippet):
                     log_to_node('sys', 'Scout-Alpha', f'Skipped non-clinic (school/edu/directory): {name}')
                     continue
+                target_btype = infer_business_type(self.target_niche)
+                if is_industry_mismatch(name=name, snippet=snippet, target_btype=target_btype):
+                    log_to_node('sys', 'Scout-Alpha', f'Skipped industry mismatch ({target_btype}): {name}')
+                    continue
                 if any(b in url for b in (
                     "yelp.com", "zocdoc.com", "healthgrades.com", "yellowpages.com",
                     "facebook.com", "instagram.com", "wikipedia.org", "indeed.com",
@@ -661,6 +716,10 @@ class ScoutAgent:
                 if is_non_commercial_lead(name=name, url=url, email=email, snippet=snippet):
                     log_to_node('sys', 'Scout-Alpha', f'Skipped after scrape (school/edu): {name} / {email}')
                     continue
+                target_btype = infer_business_type(self.target_niche)
+                if is_industry_mismatch(name=name, snippet=snippet, target_btype=target_btype):
+                    log_to_node('sys', 'Scout-Alpha', f'Skipped industry mismatch after scrape ({target_btype}): {name}')
+                    continue
 
                 has_real_email = email and '@' in email and 'not_found' not in email and 'example.com' not in email
                 if self.hunt_mode == 'quality' and not has_real_email:
@@ -699,7 +758,7 @@ def infer_business_type(niche_or_query):
         (("dental", "dentist", "orthodont"), "dental"),
         (("dermatolog", "skin clinic"), "dermatology"),
         (("medical spa", "med spa", "medspa"), "medspa"),
-        (("chiroprac"), "chiropractic"),
+        (("chiroprac",), "chiropractic"),
         (("restaurant", "dining"), "restaurant"),
         (("cafe", "coffee"), "cafe"),
         (("salon", "barber"), "salon"),
