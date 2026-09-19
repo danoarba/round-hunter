@@ -973,9 +973,11 @@ class PitchAgent:
         
         # dialaiagent demo email greets with full_name — must be the CLIENT, never our sender
         full_name = (lead.get("ceo_name") or "").strip()
-        if not full_name or full_name.lower() in ("clinic team", "owner", "clinic owner", "danial"):
+        # Blacklist our own sender names — never use them as recipient greeting
+        _SENDER_BLACKLIST = {"clinic team", "owner", "clinic owner", "danial", "hanna", "hannah", "hermes"}
+        if not full_name or full_name.lower() in _SENDER_BLACKLIST:
             doctors = (lead.get("doctors") or "").strip()
-            if doctors and doctors.lower() not in ("clinic team", "owner", "danial"):
+            if doctors and doctors.lower() not in _SENDER_BLACKLIST:
                 full_name = doctors.split(",")[0].strip()
         if not full_name:
             full_name = (lead.get("name") or "").strip()
@@ -1018,9 +1020,12 @@ class PitchAgent:
         
         location = lead.get("location", "your area")
         doctor = lead.get("doctors", "")
-        if lead.get("ceo_name"):
-            greeting = f"Hi {lead['ceo_name'].split()[0]}"
-        elif doctor and doctor != "Clinic Team":
+        _SENDER_BLACKLIST_GREET = {"clinic team", "owner", "clinic owner", "danial", "hanna", "hannah", "hermes"}
+        ceo = (lead.get("ceo_name") or "").strip()
+        ceo_first = ceo.split()[0].lower() if ceo else ""
+        if ceo and ceo_first not in _SENDER_BLACKLIST_GREET:
+            greeting = f"Hi {ceo.split()[0]}"
+        elif doctor and doctor.lower().split(',')[0].strip() not in _SENDER_BLACKLIST_GREET and doctor != "Clinic Team":
             greeting = f"Hi {doctor.split(',')[0].strip()}"
         else:
             greeting = "Hi there"
