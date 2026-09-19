@@ -770,6 +770,15 @@ function Overview({
             <h2 className="font-semibold">Hunt target</h2>
             <p className="text-xs text-[var(--color-mute)] mt-0.5">
               Default is <span className="font-semibold text-teal-800">Dental Clinics</span>. Switch industry or country anytime — swarm follows immediately.
+              {cylexApifyConfigured && !isUkLocation(location) && (
+                <span className="block mt-1 text-amber-900/90">
+                  Apify connected — Cylex API runs only for <span className="font-semibold">UK</span> targets. Pick{' '}
+                  <button type="button" onClick={() => onApplyHunt(industryId, 'London, UK')} className="underline font-semibold text-teal-800">
+                    London, UK
+                  </button>{' '}
+                  (or another UK city) to use directory data instead of US web search.
+                </span>
+              )}
               {isUkLocation(location) && (
                 <span className="block mt-1 text-teal-800/90">
                   UK data from{' '}
@@ -1557,6 +1566,9 @@ function SettingsView({ health, targetQuery, onRefreshHealth }) {
             <div className="flex justify-between gap-4"><dt className="text-[var(--color-mute)]">API</dt><dd className="font-medium flex items-center gap-1"><Check size={14} className="text-teal-700" /> OK</dd></div>
             <div className="flex justify-between gap-4"><dt className="text-[var(--color-mute)]">Swarm</dt><dd className="font-medium">{health.swarmActive ? 'Active' : 'Halted'}</dd></div>
             <div className="flex justify-between gap-4"><dt className="text-[var(--color-mute)]">Public URL</dt><dd className="font-mono text-xs break-all text-right">{health.publicUrl || '—'}</dd></div>
+            <div className="flex justify-between gap-4"><dt className="text-[var(--color-mute)]">UK hunt source</dt><dd className="font-medium font-mono text-xs">{health.ukHuntSource || 'auto'}</dd></div>
+            <div className="flex justify-between gap-4"><dt className="text-[var(--color-mute)]">Apify / Cylex</dt><dd className="font-medium flex items-center gap-1">{health.cylexApifyConfigured ? <><Check size={14} className="text-teal-700" /> Configured</> : 'Not set'}</dd></div>
+            <div className="flex justify-between gap-4"><dt className="text-[var(--color-mute)]">Hunt mode</dt><dd className="font-medium">{health.huntMode || '—'}</dd></div>
           </dl>
         ) : (
           <p className="text-sm text-[var(--color-mute)]">Could not reach /api/health</p>
