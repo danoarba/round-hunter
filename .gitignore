@@ -35,6 +35,8 @@ server/clients.db
 server/results.csv
 server/queries.txt
 server/venv/
+server/tmp/
+server/auto_send_state.json
 
 # Python cache
 __pycache__/

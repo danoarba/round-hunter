@@ -5,7 +5,7 @@ import {
   Clock, XCircle, Clock3, Send, LayoutDashboard,
   Terminal, ChevronRight, Copy, ExternalLink,
   Pause, Play, RefreshCw, Inbox, AlertTriangle,
-  Building2, MapPin, Phone, FileText, X, Check
+  Building2, MapPin, Phone, FileText, X, Check, RotateCcw, Crosshair
 } from 'lucide-react';
 
 const API_BASE_URL = window.location.port === '5173' ? `http://${window.location.hostname}:3001` : '';
@@ -48,6 +48,11 @@ function buildTargetQuery(industryQuery, location) {
   return `${industryQuery} in ${location}`;
 }
 
+function isUkLocation(location) {
+  const loc = (location || '').toLowerCase();
+  return loc.includes('uk') || loc.includes('united kingdom') || loc.includes('london') || loc.includes('manchester');
+}
+
 function parseTargetQuery(q) {
   const raw = (q || '').trim();
   const match = raw.match(/^(.+?)\s+in\s+(.+)$/i);
@@ -65,15 +70,50 @@ function parseTargetQuery(q) {
   };
 }
 
+const RESENDABLE = new Set(['Done', 'Failed', 'Email Opened', 'Hot Lead 🔥']);
+
 const STATUS_FILTERS = [
   'All', 'Awaiting Approval', 'Queued', 'Sending', 'Done',
   'Email Opened', 'Hot Lead 🔥', 'No Email', 'No Website', 'Waiting', 'Ignored', 'Failed'
 ];
 
+function canResend(p) {
+  if (!p || !RESENDABLE.has(p.status)) return false;
+  const email = String(p.email || '');
+  if (!email || email.includes('not_found') || email === 'No Email Found' || !email.includes('@')) return false;
+  if (p.status === 'No Website' || p.status === 'No Email') return false;
+  return true;
+}
+
 function parsePayload(raw) {
   if (!raw) return null;
   if (typeof raw === 'object') return raw;
   try { return JSON.parse(raw); } catch { return null; }
+}
+
+/** Pull Services / Timings / Doctors even from older coreInfo-only payloads */
+function intelligenceFields(prospect) {
+  const payload = parsePayload(prospect?.api_payload) || {};
+  const dyn = payload.dynamic_fields || {};
+  const core = String(dyn.coreInfo || '');
+  const fromCore = (label) => {
+    const re = new RegExp(`${label}:\\s*([^.]*)\\.`, 'i');
+    const m = core.match(re);
+    return m ? m[1].trim() : '';
+  };
+  const dash = (v) => {
+    const s = String(v || '').trim();
+    return s && s !== '—' ? s : '';
+  };
+  return {
+    services: dash(dyn.services) || fromCore('Services') || '—',
+    timings: dash(dyn.clinic_timings) || fromCore('Hours') || '—',
+    doctors: dash(dyn.doctors) || fromCore('Team') || '—',
+    phone: dash(payload.phone) || fromCore('Phone') || '—',
+    website: dash(payload.website_url) || '—',
+    payload,
+    dyn,
+  };
 }
 
 function statusTone(status) {
@@ -114,20 +154,44 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [health, setHealth] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [autoSend, setAutoSend] = useState({ enabled: false, dailySent: 0, dailyLimit: 50 });
+  const [neededSwarmActive, setNeededSwarmActive] = useState(false);
+  const [huntMode, setHuntMode] = useState('rotating');
+  const [ukHuntSource, setUkHuntSource] = useState('auto');
+  const [cylexApifyConfigured, setCylexApifyConfigured] = useState(false);
 
   const socketRef = useRef(null);
-  const logsEndRef = useRef(null);
+  const logsContainerRef = useRef(null);
 
   const showToast = (message, tone = 'ok') => {
     setToast({ message, tone });
     setTimeout(() => setToast(null), 3200);
   };
 
-  const loadProspects = () => {
-    fetch(`${API_BASE_URL}/api/prospects`)
-      .then(res => res.json())
-      .then(data => setProspects(Array.isArray(data) ? data : []))
-      .catch(() => setProspects([]));
+  const loadProspects = (opts = {}) => {
+    const { toast = false, resetFilter = false } = opts;
+    return fetch(`${API_BASE_URL}/api/prospects`)
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then(data => {
+        const list = Array.isArray(data) ? data : [];
+        setProspects(list);
+        if (resetFilter) setProspectFilter('All');
+        if (toast) {
+          const done = list.filter(p => p.status === 'Done').length;
+          const failed = list.filter(p => p.status === 'Failed').length;
+          const sending = list.filter(p => p.status === 'Sending').length;
+          showToast(`Refreshed ${list.length} · Done ${done} · Failed ${failed} · Sending ${sending}`);
+        }
+        return list;
+      })
+      .catch(() => {
+        setProspects([]);
+        if (toast) showToast('Refresh failed — check connection', 'err');
+        return [];
+      });
   };
 
   useEffect(() => {
@@ -136,7 +200,12 @@ export default function App() {
 
     socketRef.current.on('statusUpdate', (data) => {
       setSwarmActive(data.swarmActive);
+      if (typeof data.neededSwarmActive === 'boolean') setNeededSwarmActive(data.neededSwarmActive);
       if (data.metrics) setMetrics(data.metrics);
+      if (data.autoSend) setAutoSend(data.autoSend);
+      if (data.huntMode === 'quality' || data.huntMode === 'rotating') setHuntMode(data.huntMode);
+      if (data.ukHuntSource) setUkHuntSource(data.ukHuntSource);
+      if (typeof data.cylexApifyConfigured === 'boolean') setCylexApifyConfigured(data.cylexApifyConfigured);
       if (data.currentTargetQuery) {
         setTargetQuery(data.currentTargetQuery);
         const parsed = parseTargetQuery(data.currentTargetQuery);
@@ -145,6 +214,7 @@ export default function App() {
       }
     });
     socketRef.current.on('initialLogs', (history) => setLogs(history || []));
+    socketRef.current.on('logsCleared', () => setLogs([]));
     socketRef.current.on('log', (logEntry) => setLogs((prev) => [...prev.slice(-199), logEntry]));
     socketRef.current.on('prospect_updated', (data) => {
       setProspects((prev) => {
@@ -152,7 +222,7 @@ export default function App() {
         if (exists) return prev.map(p => p.id === data.id ? { ...p, ...data } : p);
         return [data, ...prev];
       });
-      if (selected?.id === data.id) setSelected((s) => s ? { ...s, ...data } : s);
+      setSelected((s) => (s && s.id === data.id ? { ...s, ...data } : s));
     });
 
     loadProspects();
@@ -165,14 +235,55 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (['prospects', 'campaigns', 'insights'].includes(activeTab)) loadProspects();
+    if (['prospects', 'needed', 'campaigns', 'insights'].includes(activeTab)) loadProspects();
   }, [activeTab]);
 
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = logsContainerRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
   }, [logs, activeTab]);
 
   const toggleSwarm = () => socketRef.current?.emit('toggleSwarm');
+  const toggleNeededSwarm = () => socketRef.current?.emit('toggleNeededSwarm');
+
+  const isNeeded = (p) => (p?.lane || 'standard').toLowerCase() === 'needed';
+  const isStandard = (p) => !isNeeded(p);
+
+  const toggleAutoSend = () => {
+    const next = !autoSend.enabled;
+    socketRef.current?.emit('setAutoSend', { enabled: next, dailyLimit: autoSend.dailyLimit });
+    setAutoSend((s) => ({ ...s, enabled: next }));
+    showToast(next ? `Auto-send ON — max ${autoSend.dailyLimit || 50}/day` : 'Auto-send OFF — manual only');
+  };
+
+  const updateDailyLimit = (raw) => {
+    const n = Math.min(200, Math.max(1, parseInt(raw, 10) || 50));
+    setAutoSend((s) => ({ ...s, dailyLimit: n }));
+    socketRef.current?.emit('setAutoSend', { dailyLimit: n });
+  };
+
+  const setUkHuntSourceChoice = (source) => {
+    setUkHuntSource(source);
+    socketRef.current?.emit('setUkHuntSource', { source });
+    const labels = {
+      auto: 'UK Auto — Apify Cylex API when token set, else free DDG',
+      cylex_api: 'UK Cylex API only (Apify)',
+      ddg: 'UK free DDG only',
+    };
+    showToast(labels[source] || labels.auto);
+  };
+
+  const setHuntModeChoice = (mode) => {
+    const next = mode === 'quality' ? 'quality' : 'rotating';
+    setHuntMode(next);
+    socketRef.current?.emit('setHuntMode', { mode: next });
+    showToast(
+      next === 'quality'
+        ? 'Hunt v2: Quality — multi-search, real email required'
+        : 'Hunt v2: Rotating — more volume, includes No Email rows'
+    );
+  };
 
   const handleQueryChange = (newQuery) => {
     setTargetQuery(newQuery);
@@ -207,13 +318,35 @@ export default function App() {
     }
   };
 
+  const resendProspect = async (prospect) => {
+    if (!canResend(prospect)) {
+      showToast('Cannot resend this prospect', 'err');
+      return;
+    }
+    if (!window.confirm(`Resend demo token + cold email to ${prospect.email}?`)) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/prospects/${prospect.id}/resend`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(data.error || 'Resend failed', 'err');
+        return;
+      }
+      setProspects(prev => prev.map(p => p.id === prospect.id ? { ...p, status: 'Queued' } : p));
+      if (selected?.id === prospect.id) setSelected(s => ({ ...s, status: 'Queued' }));
+      showToast('Resend queued — demo + email will send shortly');
+    } catch {
+      showToast('Resend failed', 'err');
+    }
+  };
+
   const resetDatabase = async () => {
-    if (!window.confirm('Clear the entire CRM database? This cannot be undone.')) return;
+    if (!window.confirm('Clear the entire CRM database and live logs? This cannot be undone.')) return;
     try {
       await fetch(`${API_BASE_URL}/api/prospects/reset`, { method: 'DELETE' });
       setProspects([]);
       setSelected(null);
-      showToast('Database cleared');
+      setLogs([]);
+      showToast('Database and logs cleared');
     } catch {
       showToast('Reset failed', 'err');
     }
@@ -238,7 +371,7 @@ export default function App() {
   const filteredProspects = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return prospects.filter(p => {
-      if (!p) return false;
+      if (!p || !isStandard(p)) return false;
       if (prospectFilter !== 'All' && p.status !== prospectFilter) return false;
       if (!q) return true;
       const hay = [p.name, p.email, p.location, p.niche, p.ceo_name, p.issue, p.status]
@@ -247,9 +380,34 @@ export default function App() {
     });
   }, [prospects, prospectFilter, searchQuery]);
 
+  const neededProspects = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return prospects.filter(p => {
+      if (!p || !isNeeded(p)) return false;
+      if (prospectFilter !== 'All' && p.status !== prospectFilter) return false;
+      if (!q) return true;
+      const hay = [p.name, p.email, p.location, p.niche, p.issue, p.need_signal, p.status]
+        .filter(Boolean).join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+  }, [prospects, prospectFilter, searchQuery]);
+
   const counts = useMemo(() => {
-    const c = { total: prospects.length, await: 0, queued: 0, done: 0, opened: 0, hot: 0, failed: 0, noEmail: 0 };
-    prospects.forEach(p => {
+    const standard = prospects.filter(isStandard);
+    const needed = prospects.filter(isNeeded);
+    const c = {
+      total: standard.length,
+      await: 0,
+      queued: 0,
+      done: 0,
+      opened: 0,
+      hot: 0,
+      failed: 0,
+      noEmail: 0,
+      neededTotal: needed.length,
+      neededAwait: needed.filter(p => p.status === 'Awaiting Approval').length,
+    };
+    standard.forEach(p => {
       if (p.status === 'Awaiting Approval') c.await++;
       else if (p.status === 'Queued' || p.status === 'Sending') c.queued++;
       else if (p.status === 'Done') c.done++;
@@ -264,6 +422,7 @@ export default function App() {
   const nav = [
     { id: 'overview', label: 'Overview', icon: LayoutDashboard },
     { id: 'prospects', label: 'Prospects', icon: Users, badge: counts.await || null },
+    { id: 'needed', label: 'Needed Clients', icon: Crosshair, badge: counts.neededAwait || null },
     { id: 'campaigns', label: 'Campaigns', icon: Mail, badge: counts.queued || null },
     { id: 'live', label: 'Live Log', icon: Terminal },
     { id: 'insights', label: 'Insights', icon: Activity },
@@ -329,7 +488,15 @@ export default function App() {
             <span className={`w-2 h-2 rounded-sm ${swarmActive ? 'bg-teal-400' : 'bg-rose-400'}`} />
             {sidebarOpen && (
               <span className="text-xs text-white/70 font-medium">
-                {swarmActive ? 'Swarm live' : 'Swarm halted'}
+                {swarmActive ? 'Cold swarm live' : 'Cold swarm off'}
+              </span>
+            )}
+          </div>
+          <div className={`flex items-center gap-2 px-2 py-2 rounded-lg ${neededSwarmActive ? 'bg-amber-900/40' : 'bg-white/5'}`}>
+            <span className={`w-2 h-2 rounded-sm ${neededSwarmActive ? 'bg-amber-400' : 'bg-white/25'}`} />
+            {sidebarOpen && (
+              <span className="text-xs text-white/70 font-medium">
+                {neededSwarmActive ? 'Needed hunt live' : 'Needed hunt off'}
               </span>
             )}
           </div>
@@ -346,8 +513,14 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0">
         <header className="h-16 shrink-0 surface border-b flex items-center justify-between px-6 gap-4">
           <div className="min-w-0">
-            <h1 className="text-lg font-semibold tracking-tight capitalize text-[var(--color-ink)]">
-              {activeTab === 'live' ? 'Live Log' : activeTab}
+            <h1 className="text-lg font-semibold tracking-tight text-[var(--color-ink)]">
+              {activeTab === 'live' ? 'Live Log'
+                : activeTab === 'needed' ? 'Needed Clients'
+                : activeTab === 'prospects' ? 'Prospects'
+                : activeTab === 'campaigns' ? 'Campaigns'
+                : activeTab === 'insights' ? 'Insights'
+                : activeTab === 'settings' ? 'Settings'
+                : 'Overview'}
             </h1>
             <p className="text-xs text-[var(--color-mute)] font-mono">{time}</p>
           </div>
@@ -359,27 +532,41 @@ export default function App() {
                 value={searchQuery}
                 onChange={(e) => {
                   setSearchQuery(e.target.value);
-                  if (activeTab !== 'prospects') setActiveTab('prospects');
+                  if (!['prospects', 'needed'].includes(activeTab)) setActiveTab('prospects');
                 }}
-                placeholder="Search prospects…"
+                placeholder="Search…"
                 className="bg-transparent outline-none text-sm w-full placeholder:text-[var(--color-mute)]"
               />
             </div>
-            <button
-              onClick={toggleSwarm}
-              className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
-                swarmActive
-                  ? 'bg-rose-600 text-white hover:bg-rose-700'
-                  : 'bg-teal-700 text-white hover:bg-teal-800'
-              }`}
-            >
-              {swarmActive ? <Pause size={16} /> : <Play size={16} />}
-              {swarmActive ? 'Halt Swarm' : 'Start Swarm'}
-            </button>
+            {activeTab === 'needed' ? (
+              <button
+                onClick={toggleNeededSwarm}
+                className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
+                  neededSwarmActive
+                    ? 'bg-rose-600 text-white hover:bg-rose-700'
+                    : 'bg-amber-700 text-white hover:bg-amber-800'
+                }`}
+              >
+                {neededSwarmActive ? <Pause size={16} /> : <Crosshair size={16} />}
+                {neededSwarmActive ? 'Halt Need Hunt' : 'Start Need Hunt'}
+              </button>
+            ) : (
+              <button
+                onClick={toggleSwarm}
+                className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
+                  swarmActive
+                    ? 'bg-rose-600 text-white hover:bg-rose-700'
+                    : 'bg-teal-700 text-white hover:bg-teal-800'
+                }`}
+              >
+                {swarmActive ? <Pause size={16} /> : <Play size={16} />}
+                {swarmActive ? 'Halt Swarm' : 'Start Swarm'}
+              </button>
+            )}
           </div>
         </header>
 
-        <main className="flex-1 overflow-auto p-6">
+        <main className={`flex-1 min-h-0 p-6 ${activeTab === 'live' ? 'overflow-hidden' : 'overflow-auto'}`}>
           <div className="max-w-[1400px] mx-auto">
             {activeTab === 'overview' && (
               <Overview
@@ -388,11 +575,16 @@ export default function App() {
                 targetQuery={targetQuery}
                 industryId={industryId}
                 location={location}
+                huntMode={huntMode}
+                onHuntModeChange={setHuntModeChoice}
+                ukHuntSource={ukHuntSource}
+                cylexApifyConfigured={cylexApifyConfigured}
+                onUkHuntSourceChange={setUkHuntSourceChoice}
                 onApplyHunt={applyHuntTarget}
                 onQueryChange={handleQueryChange}
                 swarmActive={swarmActive}
                 logs={logs}
-                logsEndRef={logsEndRef}
+                logsContainerRef={logsContainerRef}
                 onOpenProspects={() => setActiveTab('prospects')}
                 onOpenCampaigns={() => setActiveTab('campaigns')}
               />
@@ -401,7 +593,7 @@ export default function App() {
             {activeTab === 'prospects' && (
               <ProspectsView
                 prospects={filteredProspects}
-                allCount={prospects.length}
+                allCount={prospects.filter(isStandard).length}
                 filter={prospectFilter}
                 setFilter={setProspectFilter}
                 searchQuery={searchQuery}
@@ -410,8 +602,30 @@ export default function App() {
                 selected={selected}
                 onDraft={openDraft}
                 onStatus={updateStatus}
+                onResend={resendProspect}
                 onReset={resetDatabase}
-                onRefresh={loadProspects}
+                onRefresh={() => loadProspects({ toast: true, resetFilter: true })}
+                copyText={copyText}
+                autoSend={autoSend}
+                onToggleAutoSend={toggleAutoSend}
+                onDailyLimitChange={updateDailyLimit}
+              />
+            )}
+
+            {activeTab === 'needed' && (
+              <NeededClientsView
+                prospects={neededProspects}
+                allCount={counts.neededTotal}
+                filter={prospectFilter}
+                setFilter={setProspectFilter}
+                neededSwarmActive={neededSwarmActive}
+                onToggleHunt={toggleNeededSwarm}
+                onSelect={setSelected}
+                selected={selected}
+                onDraft={openDraft}
+                onStatus={updateStatus}
+                onResend={resendProspect}
+                onRefresh={() => loadProspects({ toast: true })}
                 copyText={copyText}
               />
             )}
@@ -420,13 +634,14 @@ export default function App() {
               <CampaignsView
                 prospects={prospects}
                 onStatus={updateStatus}
+                onResend={resendProspect}
                 onSelect={setSelected}
                 onDraft={openDraft}
               />
             )}
 
             {activeTab === 'live' && (
-              <LiveLog logs={logs} swarmActive={swarmActive} logsEndRef={logsEndRef} />
+              <LiveLog logs={logs} swarmActive={swarmActive} logsContainerRef={logsContainerRef} />
             )}
 
             {activeTab === 'insights' && (
@@ -453,6 +668,7 @@ export default function App() {
           onClose={() => setSelected(null)}
           onDraft={openDraft}
           onStatus={updateStatus}
+          onResend={resendProspect}
           copyText={copyText}
         />
       )}
@@ -532,7 +748,11 @@ export default function App() {
 
 /* ---------- Views ---------- */
 
-function Overview({ metrics, counts, targetQuery, industryId, location, onApplyHunt, onQueryChange, swarmActive, logs, logsEndRef, onOpenProspects, onOpenCampaigns }) {
+function Overview({
+  metrics, counts, targetQuery, industryId, location, huntMode, onHuntModeChange,
+  ukHuntSource, cylexApifyConfigured, onUkHuntSourceChange,
+  onApplyHunt, onQueryChange, swarmActive, logs, logsContainerRef, onOpenProspects, onOpenCampaigns,
+}) {
   const activeIndustry = INDUSTRIES.find(i => i.id === industryId) || DEFAULT_INDUSTRY;
 
   return (
@@ -550,6 +770,15 @@ function Overview({ metrics, counts, targetQuery, industryId, location, onApplyH
             <h2 className="font-semibold">Hunt target</h2>
             <p className="text-xs text-[var(--color-mute)] mt-0.5">
               Default is <span className="font-semibold text-teal-800">Dental Clinics</span>. Switch industry or country anytime — swarm follows immediately.
+              {isUkLocation(location) && (
+                <span className="block mt-1 text-teal-800/90">
+                  UK data from{' '}
+                  <a href="https://www.cylex-uk.co.uk/" target="_blank" rel="noreferrer" className="underline font-medium">Cylex</a>
+                  {cylexApifyConfigured
+                    ? ' via Apify API (structured fields).'
+                    : ' — add APIFY_API_TOKEN on Railway for accurate API pulls (else free DDG).'}
+                </span>
+              )}
             </p>
           </div>
           <div className="text-xs font-mono surface-inset px-3 py-2 rounded-lg text-[var(--color-ink-soft)] max-w-full truncate">
@@ -620,10 +849,72 @@ function Overview({ metrics, counts, targetQuery, industryId, location, onApplyH
             placeholder="e.g. Restaurant in Dubai, UAE"
           />
         </label>
+
+        {isUkLocation(location) && (
+          <div className="pt-2 border-t border-[var(--color-line)]">
+            <span className="text-xs font-semibold uppercase tracking-wide text-[var(--color-mute)]">UK data source</span>
+            <p className="text-xs text-[var(--color-mute)] mt-1 mb-3">
+              Cylex has no public MCP on this app — production uses Apify&apos;s Cylex actor API. MCP in Cursor is optional for manual tests only.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {[
+                ['auto', 'Auto (recommended)'],
+                ['cylex_api', 'Cylex API only'],
+                ['ddg', 'Free DDG'],
+              ].map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  disabled={id === 'cylex_api' && !cylexApifyConfigured}
+                  title={id === 'cylex_api' && !cylexApifyConfigured ? 'Set APIFY_API_TOKEN in Railway first' : ''}
+                  onClick={() => onUkHuntSourceChange(id)}
+                  className={`text-sm font-medium px-4 py-2.5 rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                    ukHuntSource === id || (id === 'cylex_api' && ukHuntSource === 'apify')
+                      ? 'bg-teal-700 text-white border-teal-700'
+                      : 'border-[var(--color-line)] hover:border-teal-700/40 text-[var(--color-ink-soft)]'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="pt-2 border-t border-[var(--color-line)]">
+          <span className="text-xs font-semibold uppercase tracking-wide text-[var(--color-mute)]">Hunt method (v2)</span>
+          <p className="text-xs text-[var(--color-mute)] mt-1 mb-3">
+            Rotating runs several local searches per cycle and filters schools/.edu. Quality skips leads without a real email on the website.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => onHuntModeChange('rotating')}
+              className={`text-sm font-medium px-4 py-2.5 rounded-lg border transition-colors ${
+                huntMode === 'rotating'
+                  ? 'bg-teal-700 text-white border-teal-700'
+                  : 'border-[var(--color-line)] hover:border-teal-700/40 text-[var(--color-ink-soft)]'
+              }`}
+            >
+              Rotating — more leads
+            </button>
+            <button
+              type="button"
+              onClick={() => onHuntModeChange('quality')}
+              className={`text-sm font-medium px-4 py-2.5 rounded-lg border transition-colors ${
+                huntMode === 'quality'
+                  ? 'bg-teal-700 text-white border-teal-700'
+                  : 'border-[var(--color-line)] hover:border-teal-700/40 text-[var(--color-ink-soft)]'
+              }`}
+            >
+              Quality — email required
+            </button>
+          </div>
+        </div>
       </section>
 
-      <div className="grid lg:grid-cols-5 gap-4">
-        <section className="lg:col-span-2 surface rounded-xl p-5 flex flex-col">
+      <div className="grid lg:grid-cols-5 gap-4 items-stretch">
+        <section className="lg:col-span-2 surface rounded-xl p-5 flex flex-col min-h-0">
           <h2 className="font-semibold mb-1">Pipeline</h2>
           <p className="text-xs text-[var(--color-mute)] mb-4">Where every lead sits right now</p>
           <div className="space-y-2 flex-1">
@@ -649,24 +940,23 @@ function Overview({ metrics, counts, targetQuery, industryId, location, onApplyH
           </div>
         </section>
 
-        <section className="lg:col-span-3 rounded-xl overflow-hidden border border-[#1f2924] bg-[#0f1412] flex flex-col min-h-[360px]">
-          <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between">
+        <section className="lg:col-span-3 rounded-xl overflow-hidden border border-[#1f2924] bg-[#0f1412] flex flex-col h-[380px] max-h-[380px]">
+          <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between shrink-0">
             <div className="flex items-center gap-2 text-sm text-teal-200/90 font-mono">
               <Terminal size={14} /> live swarm
             </div>
             <span className="text-[11px] text-white/40 font-mono">{logs.length} events</span>
           </div>
-          <div className="flex-1 overflow-y-auto p-4 font-mono text-[12px] space-y-1">
+          <div ref={logsContainerRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 font-mono text-[12px] space-y-1">
             {logs.length === 0 ? (
               <p className="text-white/35 py-16 text-center text-sm font-sans">
                 Start the swarm to see scout / pitch activity here.
               </p>
             ) : (
-              logs.slice(-40).map((log, i) => (
+              logs.slice(-80).map((log, i) => (
                 <LogLine key={i} {...log} />
               ))
             )}
-            <div ref={logsEndRef} />
           </div>
         </section>
       </div>
@@ -674,9 +964,149 @@ function Overview({ metrics, counts, targetQuery, industryId, location, onApplyH
   );
 }
 
+function NeededClientsView({
+  prospects, allCount, filter, setFilter, neededSwarmActive, onToggleHunt,
+  onSelect, selected, onDraft, onStatus, onResend, onRefresh, copyText
+}) {
+  return (
+    <div className="space-y-4">
+      <section className="surface rounded-xl p-5 border border-amber-200/80 bg-gradient-to-br from-amber-50/80 to-white">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="max-w-2xl">
+            <div className="inline-flex items-center gap-2 text-amber-900 font-semibold text-sm mb-1">
+              <Crosshair size={16} /> Needed Clients
+            </div>
+            <p className="text-sm text-[var(--color-ink-soft)] leading-relaxed">
+              Alag lane: businesses already signaling demand — hiring virtual/remote receptionist,
+              looking for AI phone agent, answering-service need. Hunt → personalized demo → cold email
+              (same send engine, separate list from cold Prospects).
+            </p>
+          </div>
+          <button
+            onClick={onToggleHunt}
+            className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold ${
+              neededSwarmActive
+                ? 'bg-rose-600 text-white hover:bg-rose-700'
+                : 'bg-amber-700 text-white hover:bg-amber-800'
+            }`}
+          >
+            {neededSwarmActive ? <Pause size={16} /> : <Play size={16} />}
+            {neededSwarmActive ? 'Halt Need Hunt' : 'Start Need Hunt'}
+          </button>
+        </div>
+      </section>
+
+      <div className="flex gap-4 h-[calc(100vh-16rem)] min-h-[420px]">
+        <div className="flex-1 surface rounded-xl overflow-hidden flex flex-col min-w-0">
+          <div className="p-4 border-b border-[var(--color-line)] space-y-3">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <h2 className="font-semibold">Demand queue</h2>
+                <p className="text-xs text-[var(--color-mute)]">
+                  Showing {prospects.length} of {allCount} needed leads
+                </p>
+              </div>
+              <button onClick={onRefresh} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border border-[var(--color-line)] hover:bg-stone-50">
+                <RefreshCw size={14} /> Refresh
+              </button>
+            </div>
+            <div className="flex gap-1.5 overflow-x-auto pb-1">
+              {STATUS_FILTERS.map(f => (
+                <button
+                  key={f}
+                  onClick={() => setFilter(f)}
+                  className={`shrink-0 px-2.5 py-1.5 rounded-md text-xs font-medium border ${
+                    filter === f
+                      ? 'bg-amber-800 text-white border-amber-800'
+                      : 'border-[var(--color-line)] text-[var(--color-ink-soft)] hover:bg-stone-50'
+                  }`}
+                >
+                  {f}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="flex-1 overflow-auto">
+            {prospects.length === 0 ? (
+              <div className="p-12 text-center text-sm text-[var(--color-mute)]">
+                <Crosshair className="mx-auto mb-3 text-amber-700/50" size={28} />
+                <p className="font-medium text-[var(--color-ink-soft)]">No needed clients yet</p>
+                <p className="mt-1">Start Need Hunt to find hiring / AI receptionist demand signals.</p>
+              </div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-[var(--color-panel)] border-b border-[var(--color-line)] text-[11px] uppercase tracking-wide text-[var(--color-mute)]">
+                  <tr>
+                    <th className="text-left font-semibold px-4 py-3">Business</th>
+                    <th className="text-left font-semibold px-4 py-3">Need signal</th>
+                    <th className="text-left font-semibold px-4 py-3">Contact</th>
+                    <th className="text-left font-semibold px-4 py-3">Status</th>
+                    <th className="text-right font-semibold px-4 py-3">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {prospects.map((p) => (
+                    <tr
+                      key={p.id}
+                      onClick={() => onSelect(p)}
+                      className={`border-b border-[var(--color-line)] cursor-pointer hover:bg-amber-50/40 ${
+                        selected?.id === p.id ? 'bg-amber-50/70' : ''
+                      }`}
+                    >
+                      <td className="px-4 py-3 font-medium max-w-[200px] truncate">{p.name}</td>
+                      <td className="px-4 py-3 text-xs text-[var(--color-ink-soft)] max-w-[240px] truncate">
+                        {p.need_signal || p.issue || '—'}
+                      </td>
+                      <td className="px-4 py-3 text-xs font-mono truncate max-w-[180px]">{p.email}</td>
+                      <td className="px-4 py-3">
+                        <span className={`text-[11px] font-semibold px-2 py-1 rounded-md border ${statusTone(p.status)}`}>
+                          {p.status}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
+                        <div className="inline-flex gap-2">
+                          {p.status === 'Awaiting Approval' && (
+                            <button
+                              onClick={() => onDraft(p)}
+                              className="text-xs font-semibold text-amber-900 hover:underline"
+                            >
+                              Review
+                            </button>
+                          )}
+                          {canResend(p) && (
+                            <button
+                              onClick={() => onResend(p.id)}
+                              className="text-xs font-semibold text-teal-800 hover:underline"
+                            >
+                              Resend
+                            </button>
+                          )}
+                          {p.status === 'Awaiting Approval' && (
+                            <button
+                              onClick={() => onStatus(p.id, 'Ignored')}
+                              className="text-xs font-semibold text-rose-700 hover:underline"
+                            >
+                              Ignore
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ProspectsView({
   prospects, allCount, filter, setFilter, searchQuery, setSearchQuery,
-  onSelect, selected, onDraft, onStatus, onReset, onRefresh, copyText
+  onSelect, selected, onDraft, onStatus, onResend, onReset, onRefresh, copyText,
+  autoSend, onToggleAutoSend, onDailyLimitChange
 }) {
   return (
     <div className="flex gap-4 h-[calc(100vh-8.5rem)] min-h-[520px]">
@@ -689,15 +1119,47 @@ function ProspectsView({
                 Showing {prospects.length} of {allCount}
               </p>
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap items-center">
+              <label className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs font-semibold border border-[var(--color-line)] bg-white">
+                <span className="text-[var(--color-mute)]">Daily</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={200}
+                  value={autoSend?.dailyLimit ?? 50}
+                  onChange={(e) => onDailyLimitChange?.(e.target.value)}
+                  className="w-12 bg-transparent outline-none font-mono text-center"
+                  title="Max auto-sends per day (1–200)"
+                />
+              </label>
+              <button
+                onClick={onToggleAutoSend}
+                className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${
+                  autoSend?.enabled
+                    ? 'bg-teal-700 text-white border-teal-700 hover:bg-teal-800'
+                    : 'border-[var(--color-line)] hover:bg-stone-50 text-[var(--color-ink-soft)]'
+                }`}
+                title="When ON: auto-queue Awaiting Approval with random delays up to your daily limit"
+              >
+                <Zap size={14} />
+                {autoSend?.enabled ? 'Auto-send ON' : 'Auto-send OFF'}
+                <span className={`font-mono ${autoSend?.enabled ? 'text-teal-100' : 'text-[var(--color-mute)]'}`}>
+                  {autoSend?.dailySent ?? 0}/{autoSend?.dailyLimit ?? 50}
+                </span>
+              </button>
               <button onClick={onRefresh} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border border-[var(--color-line)] hover:bg-stone-50">
                 <RefreshCw size={14} /> Refresh
               </button>
               <button onClick={onReset} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-rose-700 border border-rose-200 hover:bg-rose-50">
-                <XCircle size={14} /> Reset DB
+                <XCircle size={14} /> Reset DB + Logs
               </button>
             </div>
           </div>
+          {autoSend?.enabled && (
+            <p className="text-[11px] text-teal-800 bg-teal-50 border border-teal-100 rounded-lg px-3 py-2">
+              Auto-send active: Awaiting Approval → Queued on a random ~1.5–5 min rhythm. Daily cap {autoSend.dailyLimit}. Change the Daily number anytime. Turn OFF for full manual control.
+            </p>
+          )}
           <div className="flex items-center gap-2 md:hidden surface-inset rounded-lg px-3 py-2">
             <Search size={14} className="text-[var(--color-mute)]" />
             <input
@@ -769,10 +1231,19 @@ function ProspectsView({
                       </span>
                     </td>
                     <td className="py-3.5 px-4" onClick={(e) => e.stopPropagation()}>
-                      <div className="flex justify-end gap-1">
+                      <div className="flex justify-end gap-1 flex-wrap">
                         <IconBtn title="Ignore" onClick={() => onStatus(p.id, 'Ignored')}><XCircle size={15} /></IconBtn>
                         <IconBtn title="Waiting" onClick={() => onStatus(p.id, 'Waiting')}><Clock3 size={15} /></IconBtn>
-                        {p.status !== 'No Website' && (
+                        {canResend(p) && (
+                          <button
+                            onClick={() => onResend(p)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-semibold border border-teal-700/30 text-teal-800 hover:bg-teal-50"
+                            title="Resend demo token + cold email"
+                          >
+                            <RotateCcw size={12} /> Resend
+                          </button>
+                        )}
+                        {p.status !== 'No Website' && !['Queued', 'Sending', 'Done', 'Email Opened', 'Hot Lead 🔥'].includes(p.status) && (
                           <button
                             onClick={() => onDraft(p)}
                             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-semibold bg-teal-700 text-white hover:bg-teal-800"
@@ -793,9 +1264,10 @@ function ProspectsView({
   );
 }
 
-function DetailDrawer({ prospect, onClose, onDraft, onStatus, copyText }) {
-  const payload = parsePayload(prospect.api_payload);
-  const dyn = payload?.dynamic_fields || {};
+function DetailDrawer({ prospect, onClose, onDraft, onStatus, onResend, copyText }) {
+  const intel = intelligenceFields(prospect);
+  const payload = intel.payload;
+  const dyn = intel.dyn;
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end">
@@ -831,11 +1303,17 @@ function DetailDrawer({ prospect, onClose, onDraft, onStatus, copyText }) {
 
           <Section title="Intelligence">
             <Row icon={AlertTriangle} label="Pain / issue" value={prospect.issue || '—'} />
-            <Row icon={FileText} label="Services" value={dyn.services || '—'} />
-            <Row icon={Clock} label="Timings" value={dyn.clinic_timings || '—'} />
-            <Row icon={Users} label="Doctors" value={dyn.doctors || '—'} />
-            <Row icon={Phone} label="Phone (payload)" value={payload?.phone || '—'} />
-            <Row icon={ExternalLink} label="Website" value={payload?.website_url || '—'} onCopy={payload?.website_url ? () => copyText(payload.website_url) : undefined} />
+            {prospect.need_signal && (
+              <Row icon={Crosshair} label="Need signal" value={prospect.need_signal} />
+            )}
+            {(prospect.lane || 'standard') === 'needed' && (
+              <Row icon={Crosshair} label="Lane" value="Needed Clients" />
+            )}
+            <Row icon={FileText} label="Services" value={intel.services} />
+            <Row icon={Clock} label="Timings" value={intel.timings} />
+            <Row icon={Users} label="Doctors" value={intel.doctors} />
+            <Row icon={Phone} label="Phone (payload)" value={intel.phone} />
+            <Row icon={ExternalLink} label="Website" value={intel.website} onCopy={intel.website !== '—' ? () => copyText(intel.website) : undefined} />
             {(dyn.consultation_fee || dyn.service_fees) && (
               <>
                 <Row label="Consult fee" value={dyn.consultation_fee || '—'} />
@@ -867,7 +1345,15 @@ function DetailDrawer({ prospect, onClose, onDraft, onStatus, copyText }) {
         </div>
 
         <div className="sticky bottom-0 border-t border-[var(--color-line)] bg-[var(--color-panel)] p-4 flex flex-wrap gap-2">
-          {prospect.status !== 'No Website' && (
+          {canResend(prospect) && (
+            <button
+              onClick={() => onResend(prospect)}
+              className="flex-1 inline-flex justify-center items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold border border-teal-700 text-teal-800 hover:bg-teal-50"
+            >
+              <RotateCcw size={14} /> Resend demo + email
+            </button>
+          )}
+          {prospect.status !== 'No Website' && !['Queued', 'Sending', 'Done', 'Email Opened', 'Hot Lead 🔥'].includes(prospect.status) && (
             <button
               onClick={() => onDraft(prospect)}
               className="flex-1 inline-flex justify-center items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold bg-teal-700 text-white hover:bg-teal-800"
@@ -888,7 +1374,7 @@ function DetailDrawer({ prospect, onClose, onDraft, onStatus, copyText }) {
   );
 }
 
-function CampaignsView({ prospects, onStatus, onSelect, onDraft }) {
+function CampaignsView({ prospects, onStatus, onResend, onSelect, onDraft }) {
   const groups = {
     active: prospects.filter(p => ['Queued', 'Sending'].includes(p.status)),
     sent: prospects.filter(p => ['Done', 'Email Opened', 'Hot Lead 🔥'].includes(p.status)),
@@ -900,7 +1386,7 @@ function CampaignsView({ prospects, onStatus, onSelect, onDraft }) {
       <div className="grid sm:grid-cols-3 gap-3">
         <Stat label="In queue" value={groups.active.length} hint="Auto-send ~30s" />
         <Stat label="Sent / engaged" value={groups.sent.length} hint="Done + opens" />
-        <Stat label="Failed" value={groups.failed.length} hint="Retry from Prospects" />
+        <Stat label="Failed" value={groups.failed.length} hint="Use Resend" />
       </div>
 
       <CampaignList
@@ -908,6 +1394,7 @@ function CampaignsView({ prospects, onStatus, onSelect, onDraft }) {
         empty="Queue empty — approve a draft from Prospects."
         items={groups.active}
         onStatus={onStatus}
+        onResend={onResend}
         onSelect={onSelect}
         onDraft={onDraft}
         cancelable
@@ -917,24 +1404,26 @@ function CampaignsView({ prospects, onStatus, onSelect, onDraft }) {
         empty="No sends yet."
         items={groups.sent}
         onStatus={onStatus}
+        onResend={onResend}
         onSelect={onSelect}
         onDraft={onDraft}
+        resendable
       />
-      {groups.failed.length > 0 && (
-        <CampaignList
-          title="Failed"
-          empty=""
-          items={groups.failed}
-          onStatus={onStatus}
-          onSelect={onSelect}
-          onDraft={onDraft}
-        />
-      )}
+      <CampaignList
+        title="Failed"
+        empty="No failures."
+        items={groups.failed}
+        onStatus={onStatus}
+        onResend={onResend}
+        onSelect={onSelect}
+        onDraft={onDraft}
+        resendable
+      />
     </div>
   );
 }
 
-function CampaignList({ title, empty, items, onStatus, onSelect, onDraft, cancelable }) {
+function CampaignList({ title, empty, items, onStatus, onResend, onSelect, onDraft, cancelable, resendable }) {
   return (
     <section className="surface rounded-xl overflow-hidden">
       <div className="px-5 py-4 border-b border-[var(--color-line)]">
@@ -966,9 +1455,12 @@ function CampaignList({ title, empty, items, onStatus, onSelect, onDraft, cancel
                   Cancel
                 </button>
               )}
-              {!cancelable && p.status === 'Failed' && (
-                <button onClick={() => onDraft(p)} className="text-xs font-semibold text-teal-800 hover:underline">
-                  Retry
+              {resendable && canResend(p) && (
+                <button
+                  onClick={() => onResend(p)}
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-teal-800 hover:underline"
+                >
+                  <RotateCcw size={12} /> Resend
                 </button>
               )}
             </li>
@@ -979,10 +1471,10 @@ function CampaignList({ title, empty, items, onStatus, onSelect, onDraft, cancel
   );
 }
 
-function LiveLog({ logs, swarmActive, logsEndRef }) {
+function LiveLog({ logs, swarmActive, logsContainerRef }) {
   return (
-    <section className="rounded-xl overflow-hidden border border-[#1f2924] bg-[#0f1412] h-[calc(100vh-8.5rem)] flex flex-col">
-      <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between">
+    <section className="rounded-xl overflow-hidden border border-[#1f2924] bg-[#0f1412] h-[calc(100vh-8.5rem)] max-h-[calc(100vh-8.5rem)] flex flex-col">
+      <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2 text-sm text-teal-200 font-mono">
           <Terminal size={14} /> root@hermes
         </div>
@@ -990,13 +1482,12 @@ function LiveLog({ logs, swarmActive, logsEndRef }) {
           {swarmActive ? 'RUNNING' : 'IDLE'}
         </span>
       </div>
-      <div className="flex-1 overflow-y-auto p-4 font-mono text-[12.5px] space-y-1">
+      <div ref={logsContainerRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 font-mono text-[12.5px] space-y-1">
         {logs.length === 0 ? (
           <EmptyState dark title="No log events" body="Deploy the swarm to stream agent output." />
         ) : (
           logs.map((log, i) => <LogLine key={i} {...log} />)
         )}
-        <div ref={logsEndRef} />
       </div>
     </section>
   );

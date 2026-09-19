@@ -16,11 +16,17 @@ load_dotenv()  # also allow process env / Railway injected vars
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python execute_lead.py '<json_data>'")
+        print("Usage: python execute_lead.py '<json_data|path.json>'")
         sys.exit(1)
-        
+
+    arg = sys.argv[1]
     try:
-        data = json.loads(sys.argv[1])
+        # Prefer temp file path (avoids argv size / quoting hangs on Railway)
+        if os.path.isfile(arg):
+            with open(arg, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            data = json.loads(arg)
     except Exception as e:
         print(f"Error parsing JSON: {e}")
         sys.exit(1)
@@ -46,20 +52,108 @@ def main():
     business_name  = data.get("name", "Unknown Business")
     # Use personalized subject from DB, fallback to generic
     subject        = data.get("subject") or f"quick question about {business_name}"
-    
+
+    # Ensure demo-token access instructions are always in the cold email (no website URL — token mail has the live demo button)
+    demo_howto = (
+        "How to try your demo (about 3 minutes):\n"
+        f"1. For the live demo, use this email inbox: {target_email}\n"
+        "2. We already sent your personalized demo access there from Dial AI Agent (look for \"Your live demo is ready\").\n"
+        "3. If you do not see it in Primary, check Promotions, Updates, or All Mail (and Spam just in case).\n"
+        "4. Open that Dial AI Agent email and tap the live demo button inside — it only takes about 3 minutes."
+    )
+    # Refresh howto if an older draft exists without the inbox line
+    if "for the live demo, use this email inbox" not in email_body.lower():
+        # Remove older howto block if present, then insert fresh one
+        if "how to try your demo" in email_body.lower():
+            # Keep body above howto; simplest: append if missing key line
+            pass
+        sig_markers = ["\nDanial\n", "\nBest,\n", "\nThanks,\n"]
+        if "live demo button" not in email_body.lower() or "use this email inbox" not in email_body.lower():
+            # If old howto without inbox email, replace a known old block
+            old_start = email_body.lower().find("how to try your demo")
+            if old_start != -1:
+                # cut from howto through line before signature
+                before = email_body[:old_start].rstrip()
+                after = email_body[old_start:]
+                sig_idx = -1
+                for marker in ["\nDanial\n", "\nBest,\n", "\nThanks,\n"]:
+                    i = after.find(marker)
+                    if i != -1:
+                        sig_idx = i
+                        break
+                if sig_idx != -1:
+                    email_body = f"{before}\n\n{demo_howto}\n\nHappy to answer any questions after you try it.{after[sig_idx:]}"
+                else:
+                    email_body = f"{before}\n\n{demo_howto}\n"
+            else:
+                inserted = False
+                for marker in sig_markers:
+                    if marker in email_body:
+                        email_body = email_body.replace(
+                            marker,
+                            f"\n\n{demo_howto}\n\nHappy to answer any questions after you try it.{marker}",
+                            1
+                        )
+                        inserted = True
+                        break
+                if not inserted:
+                    email_body = f"{email_body}\n\n{demo_howto}\n"
+
     print(f"Executing campaign for {business_name} ({target_email})...")
+
+    # Keep demo greeting on the client (never our sender name)
+    if isinstance(payload, dict):
+        bad_names = {"danial", "owner", "clinic owner", "clinic team", ""}
+        if str(payload.get("full_name") or "").strip().lower() in bad_names:
+            payload["full_name"] = (
+                (data.get("ceo_name") or "").strip()
+                or business_name
+                or "there"
+            )
+        if target_email:
+            payload["email"] = target_email
     
     # -------------------------------------------------------
     # STEP 1: Trigger custom AI demo token on dialaiagent.com
     # -------------------------------------------------------
     print("Step 1: Triggering custom AI demo token on dialaiagent.com...")
     try:
+        # Normalize business_type to official enum if an old payload slips through
+        if payload.get("business_type") in ("dental", "dermatology", "medspa", "chiropractic"):
+            payload["business_type"] = "clinic"
+        if payload.get("business_type") in ("legal",):
+            payload["business_type"] = "lawfirm"
+        if payload.get("business_type") in ("real_estate",):
+            payload["business_type"] = "realestate"
+        if payload.get("business_type") in ("fitness",):
+            payload["business_type"] = "gym"
+        if payload.get("business_type") in ("cafe",):
+            payload["business_type"] = "restaurant"
+
+        # Prefer official shallow dynamic_fields shape
+        dyn = payload.get("dynamic_fields") or {}
+        if "coreInfo" not in dyn and isinstance(dyn, dict):
+            # Legacy nested payloads — flatten what we can
+            bits = []
+            for k in ("services", "location", "clinic_timings", "doctors", "agent_system_instructions"):
+                if dyn.get(k):
+                    bits.append(str(dyn[k]))
+            if bits:
+                dyn = {
+                    "features": dyn.get("features") or ["Walk-in Appointments", "New Patient Registration"],
+                    "coreInfo": " ".join(bits),
+                }
+                payload["dynamic_fields"] = dyn
+
         resp = requests.post(
             "https://dialaiagent.com/demo-requests/stream",
             json=payload,
-            timeout=15
+            headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+            timeout=90
         )
         print(f"Token trigger response: {resp.status_code}")
+        if resp.text:
+            print(f"Token trigger body: {resp.text[:400]}")
     except Exception as e:
         print(f"Warning: Token trigger failed: {e}")
 
@@ -168,11 +262,14 @@ def main():
         msg.attach(part2)
         
         # ---- Send via Brevo SMTP with STARTTLS ----
-        server = smtplib.SMTP('smtp-relay.brevo.com', 587)
+        print("Connecting to Brevo SMTP...")
+        server = smtplib.SMTP('smtp-relay.brevo.com', 587, timeout=30)
         server.ehlo()
         server.starttls()
         server.ehlo()
+        print("SMTP login...")
         server.login(BREVO_SMTP_USER, BREVO_SMTP_PASS)
+        print(f"SMTP sending to {target_email}...")
         server.send_message(msg)
         server.quit()
         print(f"Cold email sent successfully to {target_email}!")

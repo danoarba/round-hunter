@@ -56,7 +56,7 @@ def check_inbox():
     IMAP_PASS = os.environ.get("IMAP_PASS", "")
 
     if not IMAP_USER or not IMAP_PASS:
-        log_to_node('alert', 'Inbox-Monitor', 'IMAP credentials missing. Please set IMAP_USER and IMAP_PASS in .env to enable AI Reply Parser.')
+        # Node skips spawn when unset; quiet exit if run manually
         return
 
     log_to_node('sys', 'Inbox-Monitor', 'Connecting to IMAP server...')
