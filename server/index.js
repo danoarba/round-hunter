@@ -59,13 +59,17 @@ function emitLog(logData) {
 }
 
 
-let currentTargetQuery = process.env.DEFAULT_TARGET_QUERY || "Dental Clinic in New York, USA";
 /** rotating = multi-query local hunt | quality = only leads with real email on site */
 let huntMode = (process.env.HUNT_MODE || 'rotating').toLowerCase();
 /** UK: auto | cylex_api (Apify only) | ddg (free DDG, no Apify) */
 let ukHuntSource = (process.env.UK_HUNT_SOURCE || 'auto').toLowerCase();
 let autoSendState = autoSend.loadState();
 let autoSendTimer = null;
+
+// Restore persisted target query (survives Railway restarts)
+let currentTargetQuery = process.env.DEFAULT_TARGET_QUERY
+  || autoSendState.targetQuery
+  || "Dental Clinic in New York, USA";
 
 function getAutoSendPublic() {
   if (autoSendState.day !== autoSend.todayKey()) {
@@ -444,6 +448,7 @@ io.on('connection', (socket) => {
     if (query && query.trim()) {
       currentTargetQuery = query.trim();
       autoSendState.emptyHuntStreak = 0;
+      autoSendState.targetQuery = currentTargetQuery;  // persist across restarts
       autoSend.saveState(autoSendState);
       emitFullStatus();
       emitLog({ type: 'sys', id: 'Scout-Alpha', text: `Target Search Niche updated to: "${currentTargetQuery}"` });

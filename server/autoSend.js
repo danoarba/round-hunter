@@ -36,6 +36,7 @@ function defaultState() {
     day: todayKey(),
     emptyHuntStreak: 0,
     lastAutoAt: null,
+    targetQuery: null,
   };
 }
 
