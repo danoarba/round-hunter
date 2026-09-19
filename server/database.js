@@ -41,6 +41,14 @@ db.serialize(() => {
   db.run(`ALTER TABLE clients ADD COLUMN subject TEXT DEFAULT ''`, (err) => {});
   db.run(`ALTER TABLE clients ADD COLUMN lane TEXT DEFAULT 'standard'`, (err) => {});
   db.run(`ALTER TABLE clients ADD COLUMN need_signal TEXT DEFAULT ''`, (err) => {});
+
+  // Settings table — key/value store that survives Railway deploys
+  db.run(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key   TEXT PRIMARY KEY,
+      value TEXT
+    )
+  `);
 });
 
 const Database = {
@@ -132,7 +140,24 @@ const Database = {
         callback(err, this.changes);
       }
     );
-  }
+  },
+
+  /** Persist a key/value setting that survives Railway restarts/deploys. */
+  setSetting: (key, value, callback) => {
+    db.run(
+      `INSERT INTO settings (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+      [key, String(value)],
+      function (err) { if (callback) callback(err); }
+    );
+  },
+
+  getSetting: (key, defaultValue, callback) => {
+    db.get(`SELECT value FROM settings WHERE key = ?`, [key], (err, row) => {
+      if (err || !row) return callback(null, defaultValue);
+      callback(null, row.value);
+    });
+  },
 };
 
 module.exports = Database;

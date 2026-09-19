@@ -66,10 +66,9 @@ let ukHuntSource = (process.env.UK_HUNT_SOURCE || 'auto').toLowerCase();
 let autoSendState = autoSend.loadState();
 let autoSendTimer = null;
 
-// Restore persisted target query (survives Railway restarts)
-let currentTargetQuery = process.env.DEFAULT_TARGET_QUERY
-  || autoSendState.targetQuery
-  || "Dental Clinic in New York, USA";
+// currentTargetQuery: loaded from DB on boot (survives Railway deploys)
+// Priority: env var > DB saved value > hardcoded default
+let currentTargetQuery = process.env.DEFAULT_TARGET_QUERY || "Dental Clinic in London, UK";
 
 function getAutoSendPublic() {
   if (autoSendState.day !== autoSend.todayKey()) {
@@ -448,8 +447,10 @@ io.on('connection', (socket) => {
     if (query && query.trim()) {
       currentTargetQuery = query.trim();
       autoSendState.emptyHuntStreak = 0;
-      autoSendState.targetQuery = currentTargetQuery;  // persist across restarts
+      autoSendState.targetQuery = currentTargetQuery;
       autoSend.saveState(autoSendState);
+      // Also persist to SQLite DB (survives Railway deploys)
+      db.setSetting('targetQuery', currentTargetQuery);
       emitFullStatus();
       emitLog({ type: 'sys', id: 'Scout-Alpha', text: `Target Search Niche updated to: "${currentTargetQuery}"` });
     }
@@ -815,8 +816,24 @@ const PORT = process.env.PORT || 3001;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Hermes Command Center running on 0.0.0.0:${PORT}`);
   console.log(`Public URL: ${getPublicUrl()}`);
-  console.log(`Default hunt: ${currentTargetQuery}`);
 
+  // Load persisted targetQuery from SQLite (overrides default unless env var set)
+  if (!process.env.DEFAULT_TARGET_QUERY) {
+    db.getSetting('targetQuery', null, (err, saved) => {
+      if (saved) {
+        currentTargetQuery = saved;
+        console.log(`Restored hunt target from DB: ${currentTargetQuery}`);
+      }
+      console.log(`Default hunt: ${currentTargetQuery}`);
+      _bootSwarm();
+    });
+  } else {
+    console.log(`Default hunt: ${currentTargetQuery}`);
+    _bootSwarm();
+  }
+});
+
+function _bootSwarm() {
   // Clear any Sending left from previous crash / hang so queue + UI can move again
   setTimeout(() => recoverStuckSending('Boot'), 1500);
 
@@ -838,4 +855,4 @@ server.listen(PORT, '0.0.0.0', () => {
       }
     }, 4000);
   }
-});
+}
